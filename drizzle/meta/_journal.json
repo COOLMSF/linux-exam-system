@@ -1,5 +1,20 @@
 {
   "version": "7",
   "dialect": "mysql",
-  "entries": []
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1773198928371,
+      "tag": "0000_brave_domino",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1773199098219,
+      "tag": "0001_chief_fabian_cortez",
+      "breakpoints": true
+    }
+  ]
 }

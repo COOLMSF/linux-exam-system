@@ -21,15 +21,19 @@ import {
 } from "@/components/ui/sidebar";
 import { getLoginUrl } from "@/const";
 import { useIsMobile } from "@/hooks/useMobile";
-import { LayoutDashboard, LogOut, PanelLeft, Users } from "lucide-react";
+import { LayoutDashboard, LogOut, PanelLeft, Users, BookOpen, ClipboardList, Settings2, BarChart3, GraduationCap } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from './DashboardLayoutSkeleton';
 import { Button } from "./ui/button";
 
 const menuItems = [
-  { icon: LayoutDashboard, label: "Page 1", path: "/" },
-  { icon: Users, label: "Page 2", path: "/some-path" },
+  { icon: LayoutDashboard, label: "控制台", path: "/dashboard" },
+  { icon: BookOpen, label: "题库管理", path: "/questions" },
+  { icon: GraduationCap, label: "学生管理", path: "/students" },
+  { icon: ClipboardList, label: "考试管理", path: "/exams" },
+  { icon: Settings2, label: "评分规则", path: "/scoring-rules" },
+  { icon: BarChart3, label: "成绩报表", path: "/reports" },
 ];
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";
@@ -171,7 +175,7 @@ function DashboardLayoutContent({
               {!isCollapsed ? (
                 <div className="flex items-center gap-2 min-w-0">
                   <span className="font-semibold tracking-tight truncate">
-                    Navigation
+                    Linux 考试系统
                   </span>
                 </div>
               ) : null}
