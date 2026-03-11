@@ -1,0 +1,17 @@
+{
+  "query": "SELECT id, openId, name, email, role FROM users WHERE openId = 'XzgszbuxhkvHPqPcA4rhNJ';",
+  "command": "mysql --batch --raw --column-names --default-character-set=utf8mb4 --host gateway04.us-east-1.prod.aws.tidbcloud.com --port 4000 --user 3euBYL1VXejHmai.root --database mDF6NeWgKpzaSMRotCf9yQ --execute SELECT id, openId, name, email, role FROM users WHERE openId = 'XzgszbuxhkvHPqPcA4rhNJ';",
+  "rows": [
+    {
+      "id": "1",
+      "openId": "XzgszbuxhkvHPqPcA4rhNJ",
+      "name": "ellis.blimka",
+      "email": "ellis.blimka@outlook.com",
+      "role": "admin"
+    }
+  ],
+  "messages": [],
+  "stdout": "id\topenId\tname\temail\trole\n1\tXzgszbuxhkvHPqPcA4rhNJ\tellis.blimka\tellis.blimka@outlook.com\tadmin\n",
+  "stderr": "",
+  "execution_time_ms": 1659
+}
