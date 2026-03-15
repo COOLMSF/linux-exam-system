@@ -5,12 +5,12 @@ import { useCallback, useEffect, useMemo } from "react";
 
 type UseAuthOptions = {
   redirectOnUnauthenticated?: boolean;
+  /** Override the redirect path. Defaults to lazy-evaluated getLoginUrl(). */
   redirectPath?: string;
 };
 
 export function useAuth(options?: UseAuthOptions) {
-  const { redirectOnUnauthenticated = false, redirectPath = getLoginUrl() } =
-    options ?? {};
+  const { redirectOnUnauthenticated = false, redirectPath } = options ?? {};
   const utils = trpc.useUtils();
 
   const meQuery = trpc.auth.me.useQuery(undefined, {
@@ -65,9 +65,19 @@ export function useAuth(options?: UseAuthOptions) {
     if (meQuery.isLoading || logoutMutation.isPending) return;
     if (state.user) return;
     if (typeof window === "undefined") return;
-    if (window.location.pathname === redirectPath) return;
 
-    window.location.href = redirectPath
+    // Lazily resolve the redirect path only when we actually need to redirect.
+    // This prevents getLoginUrl() from being called during component mount,
+    // which would crash on Kylin OS when VITE_OAUTH_PORTAL_URL is empty.
+    let target: string;
+    try {
+      target = redirectPath ?? getLoginUrl();
+    } catch {
+      target = "/";
+    }
+
+    if (window.location.pathname === target) return;
+    window.location.href = target;
   }, [
     redirectOnUnauthenticated,
     redirectPath,

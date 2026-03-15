@@ -66,6 +66,25 @@ export async function getUserByOpenId(openId: string) {
   return r[0];
 }
 
+export async function getUserByName(name: string) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const r = await db.select().from(users).where(eq(users.name, name)).limit(1);
+  return r[0];
+}
+
+export async function setUserPassword(openId: string, passwordHash: string) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(users).set({ passwordHash }).where(eq(users.openId, openId));
+}
+
+export async function listAdminUsers() {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(users).where(eq(users.role, 'admin'));
+}
+
 // ─── Students ─────────────────────────────────────────────────────────────────
 
 export async function listStudents(opts?: { search?: string; className?: string }) {

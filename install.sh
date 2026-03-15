@@ -3,8 +3,12 @@
 # Linux 考试系统 — 一键安装 & 测试脚本
 # 兼容系统：Ubuntu 18.04/20.04/22.04 (apt) | 麒麟 V10 SP1/SP2/SP3 (yum/dnf)
 # 用法：sudo bash install.sh [--server-only | --client-only | --test-only]
+## =============================================================================
+# 快速入门：
+#   一键安装并启动：  sudo bash install.sh
+#   仅开发模式启动： bash install.sh --dev
+#   仅运行测试：     bash install.sh --test-only
 # =============================================================================
-
 set -euo pipefail
 
 # ─── 颜色输出 ─────────────────────────────────────────────────────────────────
@@ -43,12 +47,31 @@ for arg in "$@"; do
     --server-only) MODE="server-only" ;;
     --client-only) MODE="client-only" ;;
     --test-only)   MODE="test-only"   ;;
+    --dev)         MODE="dev"          ;;
+    --start)       MODE="start"        ;;
+    --stop)        MODE="stop"         ;;
+    --status)      MODE="status"       ;;
     --help|-h)
-      echo "用法: sudo bash install.sh [选项]"
+      echo ""
+      echo -e "\033[1m用法:\033[0m sudo bash install.sh [选项]"
+      echo ""
+      echo "安装模式（需要 root 权限）："
+      echo "  （无选项）         完整安装：服务端 + 客户端 + 安装依赖并启动服务"
       echo "  --server-only   仅安装服务端"
       echo "  --client-only   仅安装客户端 Agent"
+      echo ""
+      echo "运行模式（不需要 root）："
+      echo "  --dev           开发模式启动（直接在当前目录运行，无需安装）"
+      echo "  --start         启动已安装的服务 (systemd)"
+      echo "  --stop          停止服务 (systemd)"
+      echo "  --status        查看服务运行状态"
       echo "  --test-only     仅运行测试验证（不安装）"
-      echo "  --help          显示帮助"
+      echo "  --help          显示此帮助"
+      echo ""
+      echo "示例："
+      echo "  sudo bash install.sh            # 完整安装并启动"
+      echo "  bash install.sh --dev           # 开发模式即刻启动"
+      echo "  bash install.sh --test-only     # 验证环境"
       exit 0
       ;;
   esac
@@ -56,13 +79,14 @@ done
 
 # ─── 权限检查 ─────────────────────────────────────────────────────────────────
 check_root() {
-  # test-only 模式不强制要求 root
-  if [[ "$MODE" == "test-only" ]]; then
+  # 以下模式不需要 root
+  if [[ "$MODE" == "test-only" || "$MODE" == "dev" || "$MODE" == "start" || "$MODE" == "stop" || "$MODE" == "status" ]]; then
     return 0
   fi
   if [[ $EUID -ne 0 ]]; then
     log_error "安装模式需要 root 权限，请使用 sudo bash install.sh"
-    log_warn "若仅需运行测试，请使用: bash install.sh --test-only"
+    log_warn "开发模式无需 root： bash install.sh --dev"
+    log_warn "仅验证环境： bash install.sh --test-only"
     exit 1
   fi
 }
@@ -622,7 +646,223 @@ run_tests() {
   echo ""
 }
 
-# ─── 安装后提示 ───────────────────────────────────────────────────────────────
+# ─── 开发模式启动 ─────────────────────────────────────────────────────────────────
+dev_run() {
+  log_section "开发模式启动"
+  local project_dir="$SCRIPT_DIR"
+
+  # ── 自动生成 .env 文件（如不存在）──
+  if [[ ! -f "$project_dir/.env" ]]; then
+    log_info "未检测到 .env 配置文件，正在自动生成..."
+    # 生成随机 JWT 密钥
+    local jwt_secret
+    jwt_secret=$(LC_ALL=C tr -dc 'A-Za-z0-9!@#%^&*' </dev/urandom 2>/dev/null | head -c 48 || echo "exam-system-jwt-$(date +%s)-secret")
+    cat > "$project_dir/.env" <<EOF
+# Linux 考试系统 — 环境变量配置（自动生成）
+# 请根据实际环境修改数据库连接信息
+
+# 数据库连接（MySQL 兼容模式，适用于达梦 DM8）
+# 格式: mysql://用户名:密码@主机:端口/数据库名
+DATABASE_URL=mysql://root:password@localhost:3306/linux_exam
+
+# JWT 密钥（已自动生成随机值，生产环境请妥善保管）
+JWT_SECRET=${jwt_secret}
+
+# 服务端口
+PORT=3000
+
+# 运行环境
+NODE_ENV=development
+
+# OAuth 配置（本地部署可留空，系统将使用本地账号密码登录）
+OAUTH_SERVER_URL=
+VITE_OAUTH_PORTAL_URL=
+
+# 应用标题
+VITE_APP_TITLE=Linux 考试系统
+
+# 统计分析（本地部署可留空）
+VITE_ANALYTICS_ENDPOINT=
+VITE_ANALYTICS_WEBSITE_ID=
+
+# Forge API（本地部署可留空）
+BUILT_IN_FORGE_API_KEY=
+BUILT_IN_FORGE_API_URL=
+VITE_FRONTEND_FORGE_API_KEY=
+VITE_FRONTEND_FORGE_API_URL=
+
+# 应用所有者信息（本地部署可留空）
+OWNER_NAME=admin
+OWNER_OPEN_ID=local-admin
+VITE_APP_ID=local
+EOF
+    log_ok ".env 文件已生成: $project_dir/.env"
+    log_warn "请编辑 .env 文件，将 DATABASE_URL 修改为实际数据库连接信息"
+    echo ""
+    echo -e "  编辑命令: ${CYAN}nano $project_dir/.env${NC}"
+    echo -e "  ${YELLOW}提示：若暂无数据库，系统仍可启动，但数据不会持久化${NC}"
+    echo ""
+  fi
+
+  # ── 检查 Node.js 版本并自动降级 Vite（Vite 7.x 需要 Node >= 20.19 或 22.12）──
+  if command -v node &>/dev/null; then
+    local node_major node_minor node_full
+    node_full=$(node --version 2>/dev/null | sed 's/v//')
+    node_major=$(echo "$node_full" | cut -d. -f1)
+    node_minor=$(echo "$node_full" | cut -d. -f2)
+    # Vite 7 requires Node >= 20.19.0 or >= 22.12.0
+    local needs_vite_downgrade=false
+    if [[ "$node_major" -lt 20 ]]; then
+      needs_vite_downgrade=true
+    elif [[ "$node_major" -eq 20 && "$node_minor" -lt 19 ]]; then
+      needs_vite_downgrade=true
+    elif [[ "$node_major" -eq 22 && "$node_minor" -lt 12 ]]; then
+      needs_vite_downgrade=true
+    fi
+    if [[ "$needs_vite_downgrade" == "true" ]]; then
+      log_warn "Node.js v${node_full} 不满足 Vite 7.x 要求（需 v20.19+ 或 v22.12+）"
+      log_info "自动降级 Vite 到 6.x（支持 Node 18+）..."
+      cd "$project_dir"
+      # Patch package.json vite version
+      if command -v node &>/dev/null; then
+        node -e "
+          const fs = require('fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json','utf8'));
+          if (pkg.dependencies?.vite?.startsWith('^7') || pkg.devDependencies?.vite?.startsWith('^7')) {
+            if (pkg.devDependencies?.vite) pkg.devDependencies.vite = '^6.4.1';
+            if (pkg.dependencies?.vite) pkg.dependencies.vite = '^6.4.1';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+            console.log('Vite version patched to ^6.4.1');
+          } else {
+            console.log('Vite already at compatible version');
+          }
+        " 2>/dev/null || true
+        # Remove old vite from node_modules and reinstall
+        rm -rf node_modules/.pnpm/vite@7* node_modules/vite 2>/dev/null || true
+        if command -v pnpm &>/dev/null; then
+          pnpm install --no-frozen-lockfile 2>&1 | tail -5 || true
+        fi
+        log_ok "Vite 已降级至 6.x，兼容 Node.js v${node_full}"
+      fi
+    else
+      log_ok "Node.js v${node_full} 满足 Vite 7.x 要求"
+    fi
+  fi
+
+  # 检查 node_modules
+  if [[ ! -d "$project_dir/node_modules" ]]; then
+    log_warn "node_modules 不存在，正在安装依赖..."
+    cd "$project_dir"
+    if command -v pnpm &>/dev/null; then
+      pnpm install 2>&1 | tail -5
+    elif command -v npm &>/dev/null; then
+      npm install 2>&1 | tail -5
+    else
+      log_error "未找到 pnpm 或 npm，请先安装 Node.js"
+      exit 1
+    fi
+    log_ok "依赖安装完成"
+  fi
+
+  # 检查并展示本机 IP
+  local server_ip
+  server_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
+
+  log_ok "项目目录: $project_dir"
+  log_info "服务将在以下地址启动："
+  echo -e "  本机访问: ${CYAN}http://localhost:3000${NC}"
+  echo -e "  内网访问: ${CYAN}http://${server_ip}:3000${NC}"
+  echo ""
+  log_warn "按 Ctrl+C 可停止服务"
+  echo ""
+
+  # 清除 Vite 缓存（确保代码更新后生效，避免旧缓存导致白屏）
+  if [[ -d "$project_dir/node_modules/.vite" ]]; then
+    rm -rf "$project_dir/node_modules/.vite"
+    log_ok "Vite 缓存已清除"
+  fi
+
+  # 启动开发服务器
+  cd "$project_dir"
+  exec pnpm dev
+}
+
+# ─── systemd 服务控制 ─────────────────────────────────────────────────────────────────
+start_service() {
+  log_section "启动服务"
+  local SERVICE="linux-exam"
+
+  # 如果 systemd 服务存在，使用 systemd
+  if command -v systemctl &>/dev/null && systemctl list-unit-files "${SERVICE}.service" &>/dev/null 2>&1; then
+    log_info "使用 systemd 启动服务..."
+    systemctl start "$SERVICE" || { log_error "systemctl start 失败，尝试开发模式启动..." ; dev_run; }
+    systemctl enable "$SERVICE" 2>/dev/null || true
+    log_ok "服务已启动"
+    show_status
+  else
+    # 回退到开发模式
+    log_warn "systemd 服务未安装，切换到开发模式启动..."
+    dev_run
+  fi
+}
+
+stop_service() {
+  log_section "停止服务"
+  local SERVICE="linux-exam"
+  if command -v systemctl &>/dev/null && systemctl is-active "$SERVICE" &>/dev/null 2>&1; then
+    systemctl stop "$SERVICE"
+    log_ok "服务已停止"
+  else
+    # 尝试 kill pnpm dev 进程
+    local pid
+    pid=$(pgrep -f "pnpm dev" 2>/dev/null || pgrep -f "tsx watch" 2>/dev/null || echo "")
+    if [[ -n "$pid" ]]; then
+      kill "$pid" 2>/dev/null || true
+      log_ok "开发服务进程已停止 (PID: $pid)"
+    else
+      log_warn "未找到运行中的服务进程"
+    fi
+  fi
+}
+
+show_status() {
+  log_section "服务状态"
+  local SERVICE="linux-exam"
+  local server_ip
+  server_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
+
+  # systemd 状态
+  if command -v systemctl &>/dev/null && systemctl list-unit-files "${SERVICE}.service" &>/dev/null 2>&1; then
+    local svc_status
+    svc_status=$(systemctl is-active "$SERVICE" 2>/dev/null || echo "inactive")
+    if [[ "$svc_status" == "active" ]]; then
+      log_ok "systemd 服务: ${GREEN}running${NC}"
+    else
+      log_warn "systemd 服务: $svc_status"
+    fi
+  fi
+
+  # 端口监听检查
+  if ss -tlnp 2>/dev/null | grep -q ':3000' || netstat -tlnp 2>/dev/null | grep -q ':3000'; then
+    log_ok "端口 3000 正在监听"
+    echo -e "  本机访问: ${CYAN}http://localhost:3000${NC}"
+    echo -e "  内网访问: ${CYAN}http://${server_ip}:3000${NC}"
+  else
+    log_warn "端口 3000 未监听，服务可能未启动"
+    echo -e "  启动命令: ${CYAN}bash install.sh --dev${NC}  (开发模式)"
+    echo -e "  或者:     ${CYAN}bash install.sh --start${NC} (systemd 模式)"
+  fi
+
+  # API 健康检查
+  if curl -sf http://localhost:3000/api/trpc/auth.me -o /dev/null 2>/dev/null; then
+    log_ok "API 健康检查通过"
+  else
+    log_warn "API 健康检查失败（服务可能尚未就绪）"
+  fi
+  echo ""
+}
+
+# ─── 安装后提示 ─────────────────────────────────────────────────────────────────
 print_summary() {
   log_section "安装完成"
   echo -e "${BOLD}后续步骤：${NC}"
@@ -693,10 +933,21 @@ main() {
       install_client_agent
       run_tests
       ;;
-    test-only)
+     test-only)
       run_tests
+      ;;
+    dev)
+      dev_run
+      ;;
+    start)
+      start_service
+      ;;
+    stop)
+      stop_service
+      ;;
+    status)
+      show_status
       ;;
   esac
 }
-
 main "$@"

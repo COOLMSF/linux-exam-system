@@ -74,3 +74,17 @@
 - [x] Scoring rule engine tests
 - [x] Client agent API integration tests
 - [x] Auth logout test
+
+## Bug Fixes
+
+- [x] Fix OAUTH_SERVER_URL missing error on standalone deployment
+- [x] Fix vite.config.ts path join error when env vars are undefined
+- [x] Add auto .env generation in install.sh --dev mode
+- [x] Add standalone (no-OAuth) login mode for Kylin OS deployment
+- [x] Fix VITE_ANALYTICS_ENDPOINT/VITE_ANALYTICS_WEBSITE_ID undefined warning
+- [x] Fix URI malformed error in Vite 6 static middleware
+- [x] Add Vite 7→6 auto-downgrade for Node.js < 20.19
+- [x] Fix blank/empty page on local deployment (caused by PostCSS @import order error crashing CSS compilation)
+- [x] Fix @import must precede all other statements error in index.css (Google Fonts import order)
+- [x] Deep fix: localhost:3000 blank page - root cause was getLoginUrl() calling new URL('') with empty VITE_OAUTH_PORTAL_URL, crashing JS module init before React could mount
+- [ ] Fix DOMException: invalid CSS string - OKLCH color format not supported on Kylin's older Chromium (replace all oklch() with hsl())

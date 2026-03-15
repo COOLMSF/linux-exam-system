@@ -48,7 +48,23 @@ import {
   upsertUser,
 } from "./db";
 import { nanoid } from "nanoid";
+import { createHash, randomBytes } from "crypto";
 import { examQuestionAssignments } from "../drizzle/schema";
+import { getUserByName, setUserPassword, listAdminUsers } from "./db";
+
+// ─── Local auth helpers ───────────────────────────────────────────────────────
+function hashPassword(password: string, salt: string): string {
+  return createHash('sha256').update(salt + password + salt).digest('hex');
+}
+function makePasswordHash(password: string): string {
+  const salt = randomBytes(16).toString('hex');
+  return salt + ':' + hashPassword(password, salt);
+}
+function verifyPassword(password: string, stored: string): boolean {
+  const [salt, hash] = stored.split(':');
+  if (!salt || !hash) return false;
+  return hashPassword(password, salt) === hash;
+}
 
 // ─── Admin guard ──────────────────────────────────────────────────────────────
 
@@ -378,6 +394,58 @@ export const appRouter = router({
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
       return { success: true } as const;
     }),
+
+    /** Local username/password login — for standalone deployment without Manus OAuth */
+    localLogin: publicProcedure
+      .input(z.object({ username: z.string().min(1), password: z.string().min(1) }))
+      .mutation(async ({ ctx, input }) => {
+        const user = await getUserByName(input.username);
+        if (!user) throw new TRPCError({ code: 'UNAUTHORIZED', message: '用户名或密码错误' });
+        if (!user.passwordHash) throw new TRPCError({ code: 'UNAUTHORIZED', message: '该账号未设置密码，请联系管理员' });
+        if (!verifyPassword(input.password, user.passwordHash)) {
+          throw new TRPCError({ code: 'UNAUTHORIZED', message: '用户名或密码错误' });
+        }
+        // Create session token using JWT (same as OAuth flow)
+        const { sdk } = await import('./_core/sdk');
+        const sessionToken = await sdk.createSessionToken(user.openId, { name: user.name || input.username });
+        const { ONE_YEAR_MS } = await import('@shared/const');
+        const cookieOptions = getSessionCookieOptions(ctx.req);
+        ctx.res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
+        await upsertUser({ openId: user.openId, lastSignedIn: new Date() });
+        return { success: true, user: { id: user.id, name: user.name, role: user.role } };
+      }),
+
+    /** First-time setup: create the first admin account (only when no admins exist) */
+    setupAdmin: publicProcedure
+      .input(z.object({ username: z.string().min(2), password: z.string().min(6) }))
+      .mutation(async ({ input }) => {
+        const admins = await listAdminUsers();
+        if (admins.length > 0) throw new TRPCError({ code: 'FORBIDDEN', message: '管理员账号已存在，请直接登录' });
+        const openId = 'local-admin-' + nanoid(12);
+        const passwordHash = makePasswordHash(input.password);
+        await upsertUser({ openId, name: input.username, loginMethod: 'local', role: 'admin' });
+        await setUserPassword(openId, passwordHash);
+        return { success: true, message: '管理员账号创建成功，请登录' };
+      }),
+
+    /** Check if any admin exists (used to show setup page) */
+    needsSetup: publicProcedure.query(async () => {
+      const admins = await listAdminUsers();
+      return { needsSetup: admins.length === 0 };
+    }),
+
+    /** Change password for logged-in user */
+    changePassword: protectedProcedure
+      .input(z.object({ oldPassword: z.string(), newPassword: z.string().min(6) }))
+      .mutation(async ({ ctx, input }) => {
+        const user = await getUserByOpenId(ctx.user.openId);
+        if (!user) throw new TRPCError({ code: 'NOT_FOUND', message: '用户不存在' });
+        if (user.passwordHash && !verifyPassword(input.oldPassword, user.passwordHash)) {
+          throw new TRPCError({ code: 'UNAUTHORIZED', message: '原密码错误' });
+        }
+        await setUserPassword(user.openId, makePasswordHash(input.newPassword));
+        return { success: true };
+      }),
   }),
   students: studentsRouter,
   categories: categoriesRouter,
