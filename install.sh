@@ -56,6 +56,7 @@ for arg in "$@"; do
     --stop)        MODE="stop"         ;;
     --status)      MODE="status"       ;;
     --demo-exam)   MODE="demo-exam"    ;;
+    --reset-db)    MODE="reset-db"     ;;
     --help|-h)
       echo ""
       echo -e "\033[1m用法:\033[0m sudo bash install.sh [选项]"
@@ -80,6 +81,10 @@ for arg in "$@"; do
       echo "  --stop          停止服务 (systemd)"
       echo "  --status        查看服务运行状态"
       echo "  --test-only     仅运行测试验证（不安装）"
+      echo ""
+      echo "维护模式（需要 root 权限）："
+      echo "  --reset-db      重置数据库（删除所有数据并重新初始化）"
+      echo ""
       echo "  --help          显示此帮助"
       echo ""
       echo "示例："
@@ -90,6 +95,7 @@ for arg in "$@"; do
       echo "  bash install.sh --package-server        # 打包服务端"
       echo "  bash install.sh --package-all           # 打包全部用于分发"
       echo "  bash install.sh --demo-exam             # 演示考试全流程测试"
+      echo "  sudo bash install.sh --reset-db         # 重置数据库（清空所有数据）"
       exit 0
       ;;
   esac
@@ -98,7 +104,7 @@ done
 # ─── 权限检查 ─────────────────────────────────────────────────────────────────
 check_root() {
   # 以下模式不需要 root
-  if [[ "$MODE" == "test-only" || "$MODE" == "dev" || "$MODE" == "start" || "$MODE" == "stop" || "$MODE" == "status" ]]; then
+  if [[ "$MODE" == "test-only" || "$MODE" == "dev" || "$MODE" == "start" || "$MODE" == "stop" || "$MODE" == "status" || "$MODE" == "reset-db" ]]; then
     return 0
   fi
   if [[ $EUID -ne 0 ]]; then
@@ -1205,6 +1211,252 @@ print_summary() {
   echo ""
 }
 
+# ─── MySQL 数据库安装与配置 ─────────────────────────────────────────────────────
+install_mysql() {
+  log_section "安装 MySQL 数据库"
+
+  # 检查 MySQL 是否已运行
+  if command -v mysql &>/dev/null && mysqladmin ping -h localhost &>/dev/null 2>&1; then
+    log_ok "MySQL 已在运行，跳过安装"
+    return 0
+  fi
+
+  log_info "安装 MySQL 服务器..."
+  case "$PKG_MANAGER" in
+    apt)
+      # 非交互式安装
+      export DEBIAN_FRONTEND=noninteractive
+      pkg_install mysql-server mysql-client mysql-common 2>>"$LOG_FILE"
+      # 启动 MySQL
+      systemctl start mysql 2>>"$LOG_FILE" || service mysql start 2>>"$LOG_FILE" || true
+      systemctl enable mysql 2>>"$LOG_FILE" || true
+      ;;
+    dnf|yum)
+      pkg_install mysql-server mysql 2>>"$LOG_FILE"
+      systemctl start mysqld 2>>"$LOG_FILE" || service mysqld start 2>>"$LOG_FILE" || true
+      systemctl enable mysqld 2>>"$LOG_FILE" || true
+      ;;
+  esac
+
+  # 等待 MySQL 就绪
+  log_info "等待 MySQL 启动..."
+  for i in {1..30}; do
+    if mysqladmin ping -h localhost &>/dev/null 2>&1; then
+      log_ok "MySQL 已就绪"
+      break
+    fi
+    sleep 1
+  done
+
+  if ! mysqladmin ping -h localhost &>/dev/null 2>&1; then
+    log_error "MySQL 启动失败，请检查日志"
+    exit 1
+  fi
+
+  log_ok "MySQL $(mysql --version) 安装成功"
+}
+
+# ─── 数据库初始化 ─────────────────────────────────────────────────────────────
+init_database() {
+  log_section "初始化数据库"
+
+  # 生成随机密码
+  local db_password
+  db_password=$(LC_ALL=C tr -dc 'A-Za-z0-9!@#%^&*' </dev/urandom 2>/dev/null | head -c 16 || echo "ExamPass$(date +%s)")
+
+  log_info "创建数据库和用户..."
+
+  # MySQL 初始化脚本
+  mysql -h localhost -u root <<MYSQL_SCRIPT
+-- 创建数据库
+CREATE DATABASE IF NOT EXISTS linux_exam CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+-- 创建用户并授权
+CREATE USER IF NOT EXISTS 'exam_user'@'localhost' IDENTIFIED BY '${db_password}';
+GRANT ALL PRIVILEGES ON linux_exam.* TO 'exam_user'@'localhost';
+FLUSH PRIVILEGES;
+
+-- 验证
+SELECT 'Database created successfully' AS status;
+MYSQL_SCRIPT
+
+  if [[ $? -ne 0 ]]; then
+    log_error "数据库初始化失败"
+    exit 1
+  fi
+
+  log_ok "数据库 linux_exam 创建成功"
+  log_ok "用户 exam_user 创建成功"
+
+  # 保存密码到临时文件供后续使用
+  echo "$db_password" > /tmp/linux_exam_db_pass.tmp
+  chmod 600 /tmp/linux_exam_db_pass.tmp
+
+  # 更新 .env 文件
+  local env_file="$SCRIPT_DIR/.env"
+  if [[ -f "$env_file" ]]; then
+    sed -i "s|^DATABASE_URL=.*|DATABASE_URL=mysql://exam_user:${db_password}@localhost:3306/linux_exam|" "$env_file"
+  fi
+
+  log_ok "数据库连接信息已写入 .env"
+}
+
+# ─── 数据库重置 ───────────────────────────────────────────────────────────────
+reset_database() {
+  log_section "重置数据库"
+
+  echo -e "${YELLOW}${BOLD}⚠️  警告：此操作将删除所有考试数据！${NC}"
+  echo ""
+  echo "  此操作将："
+  echo "    1. 删除现有的 linux_exam 数据库"
+  echo "    2. 删除 exam_user 用户"
+  echo "    3. 重新创建数据库和用户"
+  echo "    4. 重新运行数据库迁移"
+  echo ""
+  echo -e "${RED}  所有考试记录、学生信息、题目等数据将永久丢失！${NC}"
+  echo ""
+
+  # 确认提示
+  read -r -p "  确定要继续吗？(输入 yes 确认): " confirm
+
+  if [[ "$confirm" != "yes" ]]; then
+    log_warn "用户取消操作"
+    exit 0
+  fi
+
+  log_info "开始重置数据库..."
+
+  # 1. 停止服务（如果正在运行）
+  log_info "停止服务..."
+  if command -v systemctl &>/dev/null && systemctl is-active linux-exam &>/dev/null 2>&1; then
+    systemctl stop linux-exam 2>/dev/null || true
+    log_ok "系统服务已停止"
+  fi
+
+  # 2. 删除旧数据库和用户
+  log_info "删除旧数据库和用户..."
+  mysql -h localhost -u root <<MYSQL_SCRIPT
+-- 删除数据库
+DROP DATABASE IF EXISTS linux_exam;
+
+-- 删除用户
+DROP USER IF EXISTS 'exam_user'@'localhost';
+
+-- 刷新权限
+FLUSH PRIVILEGES;
+
+SELECT 'Old database and user deleted' AS status;
+MYSQL_SCRIPT
+
+  if [[ $? -ne 0 ]]; then
+    log_error "删除旧数据库失败"
+    exit 1
+  fi
+
+  log_ok "旧数据库已删除"
+
+  # 3. 重新初始化数据库
+  init_database
+
+  # 4. 重新运行迁移
+  run_database_migration
+
+  # 5. 重启服务
+  log_info "重启服务..."
+  if command -v systemctl &>/dev/null && [[ -f /etc/systemd/system/linux-exam.service ]]; then
+    systemctl daemon-reload
+    systemctl start linux-exam
+    systemctl enable linux-exam 2>/dev/null || true
+    log_ok "系统服务已重启"
+  fi
+
+  # 6. 显示新配置
+  log_section "数据库重置完成"
+
+  echo ""
+  echo -e "${GREEN}${BOLD}✓ 数据库已成功重置！${NC}"
+  echo ""
+
+  # 读取新密码
+  local new_pass=""
+  if [[ -f "$SCRIPT_DIR/.env" ]]; then
+    new_pass=$(grep "^DATABASE_URL=" "$SCRIPT_DIR/.env" | sed -E 's|mysql://[^:]+:([^@]+)@.*|\1|')
+    new_pass=$(printf '%b' "${new_pass//%/\\x}")
+  fi
+
+  echo -e "  新的数据库连接信息："
+  echo -e "    ${CYAN}数据库名：linux_exam${NC}"
+  echo -e "    ${CYAN}用户名：exam_user${NC}"
+  echo -e "    ${CYAN}密码：${new_pass}${NC}"
+  echo ""
+  echo -e "  配置文件已更新：${CYAN}$SCRIPT_DIR/.env${NC}"
+  echo ""
+  echo -e "${YELLOW}提示：请妥善保管新的数据库密码！${NC}"
+  echo ""
+}
+
+# ─── 数据库迁移 ───────────────────────────────────────────────────────────────
+run_database_migration() {
+  log_section "执行数据库迁移"
+
+  cd "$SCRIPT_DIR"
+
+  # 检查 node_modules
+  if [[ ! -d "$SCRIPT_DIR/node_modules" ]]; then
+    log_info "安装 Node.js 依赖..."
+    pnpm install --frozen-lockfile 2>>"$LOG_FILE" || pnpm install 2>>"$LOG_FILE"
+  fi
+
+  # 运行 Drizzle 迁移
+  log_info "执行 Drizzle 迁移..."
+  pnpm db:push 2>>"$LOG_FILE"
+
+  if [[ $? -ne 0 ]]; then
+    log_warn "Drizzle 迁移失败，尝试直接应用 SQL 迁移..."
+    # 直接应用 SQL 迁移文件
+    local db_pass
+    if [[ -f /tmp/linux_exam_db_pass.tmp ]]; then
+      db_pass=$(cat /tmp/linux_exam_db_pass.tmp)
+    else
+      db_pass=$(grep "^DATABASE_URL=" "$SCRIPT_DIR/.env" | sed -E 's|mysql://[^:]+:([^@]+)@.*|\1|')
+      db_pass=$(printf '%b' "${db_pass//%/\\x}")
+    fi
+
+    # 应用所有迁移文件
+    for sql_file in "$SCRIPT_DIR/drizzle"/*.sql; do
+      if [[ -f "$sql_file" ]]; then
+        log_info "应用迁移：$(basename "$sql_file")"
+        MYSQL_PWD="$db_pass" mysql -h localhost -u exam_user linux_exam < "$sql_file" 2>>"$LOG_FILE"
+      fi
+    done
+  fi
+
+  log_ok "数据库迁移完成"
+
+  # 验证表结构
+  log_info "验证数据库表结构..."
+  local db_pass
+  if [[ -f /tmp/linux_exam_db_pass.tmp ]]; then
+    db_pass=$(cat /tmp/linux_exam_db_pass.tmp)
+  else
+    db_pass=$(grep "^DATABASE_URL=" "$SCRIPT_DIR/.env" | sed -E 's|mysql://[^:]+:([^@]+)@.*|\1|')
+    db_pass=$(printf '%b' "${db_pass//%/\\x}")
+  fi
+
+  local table_count
+  table_count=$(MYSQL_PWD="$db_pass" mysql -h localhost -u exam_user linux_exam -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='linux_exam'" 2>/dev/null || echo "0")
+
+  if [[ "$table_count" -gt 0 ]]; then
+    log_ok "数据库表创建成功 ($table_count 个表)"
+    MYSQL_PWD="$db_pass" mysql -h localhost -u exam_user linux_exam -e "SHOW TABLES;" 2>/dev/null | tail -n +2 | while read -r table; do
+      echo "    - $table"
+    done
+  else
+    log_error "数据库表创建失败"
+    exit 1
+  fi
+}
+
 # ─── 主流程 ───────────────────────────────────────────────────────────────────
 main() {
   # 初始化日志
@@ -1233,15 +1485,22 @@ main() {
       install_base_deps
       install_nodejs
       install_python
+      install_mysql
+      init_database
       install_server
       install_client_agent
+      run_database_migration
       run_tests
       print_summary
       ;;
     server-only)
       install_base_deps
       install_nodejs
+      install_python
+      install_mysql
+      init_database
       install_server
+      run_database_migration
       run_tests
       print_summary
       ;;
@@ -1268,6 +1527,9 @@ main() {
       ;;
     demo-exam)
       demo_exam_test
+      ;;
+    reset-db)
+      reset_database
       ;;
   esac
 }
