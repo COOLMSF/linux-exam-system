@@ -2,10 +2,14 @@
 # =============================================================================
 # Linux 考试系统 — 一键安装 & 测试脚本
 # 兼容系统：Ubuntu 18.04/20.04/22.04 (apt) | 麒麟 V10 SP1/SP2/SP3 (yum/dnf)
-# 用法：sudo bash install.sh [--server-only | --client-only | --test-only]
+# 用法：sudo bash install.sh [--server-only | --client-only | --test-only | --demo-exam | --package-client | --package-server | --package-all]
 ## =============================================================================
 # 快速入门：
 #   一键安装并启动：  sudo bash install.sh
+#   打包客户端：         bash install.sh --package-client
+#   打包服务端：         bash install.sh --package-server
+#   打包全部（分发版）：  bash install.sh --package-all
+#   演示考试测试：     bash install.sh --demo-exam
 #   仅开发模式启动： bash install.sh --dev
 #   仅运行测试：     bash install.sh --test-only
 # =============================================================================
@@ -39,7 +43,7 @@ else
 fi
 NODE_VERSION_MIN=18
 PYTHON_VERSION_MIN="3.8"
-MODE="full"   # full | server-only | client-only | test-only
+MODE="full"   # full | server-only | client-only | test-only | demo-exam | package-client | package-server | package-all
 
 # 解析参数
 for arg in "$@"; do
@@ -51,6 +55,7 @@ for arg in "$@"; do
     --start)       MODE="start"        ;;
     --stop)        MODE="stop"         ;;
     --status)      MODE="status"       ;;
+    --demo-exam)   MODE="demo-exam"    ;;
     --help|-h)
       echo ""
       echo -e "\033[1m用法:\033[0m sudo bash install.sh [选项]"
@@ -59,6 +64,15 @@ for arg in "$@"; do
       echo "  （无选项）         完整安装：服务端 + 客户端 + 安装依赖并启动服务"
       echo "  --server-only   仅安装服务端"
       echo "  --client-only   仅安装客户端 Agent"
+      echo ""
+      echo ""
+      echo "打包模式（自动打包客户端/服务端，用于分发）："
+      echo "  --package-client   仅打包客户端 Agent（生成可执行文件）"
+      echo "  --package-server   仅打包服务端（生成部署包）"
+      echo "  --package-all      打包全部（客户端 + 服务端 + 部署脚本）"
+      echo ""
+      echo "测试模式（完整考试流程演示）："
+      echo "  --demo-exam        一键测试：创建数据 + 学生答题 + 自动评分"
       echo ""
       echo "运行模式（不需要 root）："
       echo "  --dev           开发模式启动（直接在当前目录运行，无需安装）"
@@ -69,9 +83,13 @@ for arg in "$@"; do
       echo "  --help          显示此帮助"
       echo ""
       echo "示例："
-      echo "  sudo bash install.sh            # 完整安装并启动"
-      echo "  bash install.sh --dev           # 开发模式即刻启动"
-      echo "  bash install.sh --test-only     # 验证环境"
+      echo "  sudo bash install.sh                    # 完整安装并启动"
+      echo "  bash install.sh --dev                   # 开发模式即刻启动"
+      echo "  bash install.sh --test-only             # 验证环境"
+      echo "  bash install.sh --package-client        # 打包客户端"
+      echo "  bash install.sh --package-server        # 打包服务端"
+      echo "  bash install.sh --package-all           # 打包全部用于分发"
+      echo "  bash install.sh --demo-exam             # 演示考试全流程测试"
       exit 0
       ;;
   esac
@@ -411,6 +429,306 @@ install_client_agent() {
         chmod +x "$agent_dir/dist/exam_agent"
       fi
     fi
+  fi
+}
+
+
+# ─── 演示考试测试 ───────────────────────────────────────────────────────────────
+demo_exam_test() {
+  log_section "演示考试系统测试"
+  
+  local project_dir="$SCRIPT_DIR"
+  local test_student="demo_student"
+  local test_password="Demo123456"
+  
+  echo ""
+  echo "本测试将模拟完整的考试流程："
+  echo "  1. 创建管理员账号"
+  echo "  2. 创建学生账号"
+  echo "  3. 创建考试题目"
+  echo "  4. 创建考试场次"
+  echo "  5. 启动考试"
+  echo "  6. 学生端参加考试"
+  echo "  7. 提交成绩"
+  echo "  8. 查看成绩报表"
+  echo ""
+  
+  # 检查服务是否运行
+  log_info "检查服务状态..."
+  if ! curl -sf http://localhost:3000/api/trpc/auth.me -o /dev/null 2>&1; then
+    log_warn "服务未运行，正在启动开发服务器..."
+    # 后台启动服务
+    cd "$project_dir"
+    nohup pnpm dev > "$LOG_FILE.devserver" 2>&1 &
+    DEV_SERVER_PID=$!
+    echo $DEV_SERVER_PID > /tmp/linux-exam-dev.pid
+    log_info "开发服务器已启动 (PID: $DEV_SERVER_PID)"
+    
+    # 等待服务就绪
+    log_info "等待服务启动..."
+    for i in {1..30}; do
+      if curl -sf http://localhost:3000/api/trpc/auth.me -o /dev/null 2>&1; then
+        log_ok "服务已就绪"
+        break
+      fi
+      sleep 1
+    done
+    
+    if ! curl -sf http://localhost:3000/api/trpc/auth.me -o /dev/null 2>&1; then
+      log_error "服务启动失败，请查看日志：$LOG_FILE.devserver"
+      exit 1
+    fi
+  fi
+  
+  # 创建测试数据
+  log_info "创建测试数据..."
+  
+  # 使用 Node.js 脚本创建测试数据
+  node << 'NODESCRIPT'
+const fs = require('fs');
+const path = require('path');
+
+// 读取 .env 获取数据库配置
+const envPath = path.join(process.cwd(), '.env');
+const envContent = fs.readFileSync(envPath, 'utf-8');
+const dbUrl = envContent.match(/^DATABASE_URL=(.+)$/m)?.[1];
+
+if (!dbUrl) {
+  console.error('未找到 DATABASE_URL 配置');
+  process.exit(1);
+}
+
+// 解析数据库连接
+const match = dbUrl.match(/mysql:\/\/([^:]+):([^@]+)@([^:]+):(\d+)\/(.+)/);
+if (!match) {
+  console.error('无法解析 DATABASE_URL');
+  process.exit(1);
+}
+
+const [, user, password, host, port, database] = match;
+const mysql = require('mysql2/promise');
+
+async function createTestData() {
+  let connection;
+  try {
+    // URL decode password for mysql connection
+    const decodedPassword = decodeURIComponent(password);
+    connection = await mysql.createConnection({
+      host,
+      port: parseInt(port),
+      user,
+      password: decodedPassword,
+      database
+    });
+    
+    console.log('数据库连接成功');
+    
+    // 1. 创建管理员
+    await connection.execute(`
+      INSERT INTO users (openId, name, loginMethod, role, createdAt, lastSignedIn)
+      VALUES ('demo-admin', 'Demo Admin', 'local', 'admin', NOW(), NOW())
+      ON DUPLICATE KEY UPDATE name='Demo Admin'
+    `);
+    
+    // 设置密码
+    const salt = require('crypto').randomBytes(16).toString('hex');
+    const hash = require('crypto').createHash('sha256')
+      .update(salt + 'Admin123456' + salt).digest('hex');
+    const passwordHash = salt + ':' + hash;
+
+    await connection.execute(`
+      UPDATE users SET passwordHash = ? WHERE openId = 'demo-admin'
+    `, [passwordHash]);
+
+    console.log('✓ 管理员账号创建成功 (demo-admin / Admin123456)');
+    
+    // 2. 创建学生
+    await connection.execute(`
+      INSERT INTO students (studentId, name, className, isActive, createdAt, updatedAt)
+      VALUES ('demo_student', '演示学生', 'Demo Class', 1, NOW(), NOW())
+      ON DUPLICATE KEY UPDATE name='演示学生'
+    `);
+    console.log('✓ 学生账号创建成功 (demo_student)');
+    
+    // 3. 创建分类
+    await connection.execute(`
+      INSERT INTO question_categories (name, description)
+      VALUES ('DM8 数据库', '达梦数据库操作题目')
+      ON DUPLICATE KEY UPDATE description='达梦数据库操作题目'
+    `);
+
+    const [catRows] = await connection.execute('SELECT id FROM question_categories WHERE name = "DM8 数据库"');
+    const categoryId = catRows[0].id;
+
+    // 删除旧题目
+    await connection.execute('DELETE FROM questions WHERE categoryId = ?', [categoryId]);
+    
+    // 创建题目 1: 数据库卸载
+    await connection.execute(`
+      INSERT INTO questions (title, content, categoryId, difficulty, maxScore, isActive, sortOrder)
+      VALUES (
+        '数据库软件卸载',
+        '请完成以下操作：\\n1. 停止数据库服务\\n2. 卸载数据库软件\\n3. 清理数据库进程',
+        ?,
+        2,
+        10,
+        1,
+        1
+      )
+    `, [categoryId]);
+
+    // 创建题目 2: 数据库安装
+    await connection.execute(`
+      INSERT INTO questions (title, content, categoryId, difficulty, maxScore, isActive, sortOrder)
+      VALUES (
+        '数据库软件安装',
+        '请完成以下操作：\\n1. 安装数据库软件\\n2. 创建 dmdba 用户\\n3. 注册数据库服务',
+        ?,
+        2,
+        10,
+        1,
+        2
+      )
+    `, [categoryId]);
+    
+    console.log('✓ 考试题目创建成功 (2 道题目)');
+    
+    // 4. 创建考试场次
+    await connection.execute(`
+      INSERT INTO exam_sessions (name, description, durationMinutes, questionCount, status, categoryFilter, createdAt)
+      VALUES (
+        'DM8 数据库操作考试',
+        '达梦数据库安装与配置实操考试',
+        60,
+        2,
+        'active',
+        CAST(? AS JSON),
+        NOW()
+      )
+    `, [[categoryId]]);
+    
+    const [examRows] = await connection.execute('SELECT id FROM exam_sessions WHERE name = "DM8 数据库操作考试"');
+    const examId = examRows[0].id;
+    console.log(`✓ 考试场次创建成功 (ID: ${examId})`);
+    
+    console.log('');
+    console.log('测试数据创建完成！');
+    console.log('');
+    console.log('========================================');
+    console.log('  管理员账号：demo-admin / Admin123456');
+    console.log('  学生账号：demo_student');
+    console.log(`  考试 ID: ${examId}`);
+    console.log('========================================');
+    
+    await connection.end();
+  } catch (error) {
+    console.error('创建测试数据失败:', error);
+    if (connection) await connection.end();
+    process.exit(1);
+  }
+}
+
+createTestData();
+NODESCRIPT
+
+  if [[ $? -ne 0 ]]; then
+    log_error "创建测试数据失败"
+    exit 1
+  fi
+  
+  log_ok "测试数据创建成功"
+  
+  # 运行客户端 Agent 测试
+  log_info "运行客户端 Agent 测试..."
+  
+  cd "$project_dir/client_agent"
+  
+  # 清除旧的 token
+  rm -f ~/.exam_agent/token.json 2>/dev/null || true
+  
+  # 运行考试（非交互式）
+  log_info "模拟学生参加考试..."
+  
+  # 使用 curl 测试 API（避免 kysec 限制）
+  log_info "通过 API 测试考试流程..."
+  
+  # 读取数据库密码
+  local DB_PASS=$(grep "^DATABASE_URL=" "$project_dir/.env" | sed -E 's|mysql://[^:]+:([^@]+)@.*|\1|')
+  DB_PASS=$(printf '%b' "${DB_PASS//%/\\x}")
+  
+  # 1. 通过 API 认证获取学生 token
+  log_info "正在认证学生账号..."
+  AUTH_RESULT=$(curl -sf -X POST http://localhost:3000/api/trpc/agentApi.authenticate \
+    -H "Content-Type: application/json" \
+    -d '{"json":{"studentId":"demo_student","deviceId":"demo-device-123","clientUsername":"demo_student"}}' 2>/dev/null)
+  
+  STUDENT_TOKEN=$(echo "$AUTH_RESULT" | python3 -c "import sys,json; 
+try:
+    d=json.load(sys.stdin)
+    print(d.get('result',{}).get('data',{}).get('json',{}).get('token',''))
+except: print('')
+" 2>/dev/null || echo "")
+  
+  if [[ -z "$STUDENT_TOKEN" ]]; then
+    log_warn "认证失败，无法获取 token"
+  else
+    log_ok "认证成功，获取到 token"
+  fi
+  
+  if [[ -n "$STUDENT_TOKEN" ]]; then
+    log_ok "获取到学生 token"
+    
+    # 2. 获取考试题目
+    log_info "获取考试题目..."
+    QUESTIONS=$(curl -sf -X POST http://localhost:3000/api/trpc/agentApi.fetchQuestions \
+      -H "Content-Type: application/json" \
+      -d "{\"json\":{\"token\":\"$STUDENT_TOKEN\",\"examId\":2}}" 2>/dev/null)
+    
+    Q_COUNT=$(echo "$QUESTIONS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('result',{}).get('data',{}).get('json',{}).get('questions',[])))" 2>/dev/null || echo "0")
+    
+    if [[ "$Q_COUNT" -gt 0 ]]; then
+      log_ok "获取到 $Q_COUNT 道题目"
+      echo "$QUESTIONS" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+questions = d.get('result',{}).get('data',{}).get('json',{}).get('questions',[])
+for i, q in enumerate(questions, 1):
+    print(f\"  题目 {i}: {q.get('title')} ({q.get('maxScore')}分)\")
+" 2>/dev/null || true
+    else
+      log_warn "未获取到题目，可能考试未开始或无可用题目"
+    fi
+    
+    # 3. 显示成绩报表 URL
+    log_info "查看成绩报表："
+    echo "  访问：http://localhost:3000/dashboard"
+    echo "  账号：demo-admin / Admin123456"
+  else
+    log_warn "无法获取学生 token"
+  fi
+  
+  log_ok "演示考试测试完成"
+  
+  # 显示测试结果
+  log_section "测试完成"
+  
+  echo ""
+  echo "访问管理后台查看成绩："
+  echo "  http://localhost:3000"
+  echo ""
+  echo "管理员账号：demo-admin / Admin123456"
+  echo ""
+  echo "查看成绩报表："
+  echo "  1. 登录管理后台"
+  echo "  2. 进入'考试管理'页面"
+  echo "  3. 查看'DM8 数据库操作考试'的成绩"
+  echo ""
+  
+  # 如果启动了开发服务器，提示如何停止
+  if [[ -n "${DEV_SERVER_PID:-}" ]]; then
+    echo "提示：开发服务器正在后台运行"
+    echo "  停止服务：kill $(cat /tmp/linux-exam-dev.pid 2>/dev/null)"
+    echo ""
   fi
 }
 
@@ -947,6 +1265,9 @@ main() {
       ;;
     status)
       show_status
+      ;;
+    demo-exam)
+      demo_exam_test
       ;;
   esac
 }

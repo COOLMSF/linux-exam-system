@@ -221,18 +221,20 @@ class ExamAPIClient:
             except Exception as e:
                 raise APIError(f"API 调用失败: {e}")
 
-    def authenticate(self, username: str, device_id: str) -> Dict[str, Any]:
+    def authenticate(self, student_id: str, device_id: str, client_username: str) -> Dict[str, Any]:
         """客户端身份认证，获取 Token"""
-        logger.info(f"正在认证用户: {username}")
+        logger.info(f"正在认证用户: {student_id}")
         result = self._call(
             "agentApi.authenticate",
-            {"username": username, "deviceId": device_id},
+            {"studentId": student_id, "deviceId": device_id, "clientUsername": client_username},
             method="POST"
         )
-        if result.get("token"):
-            self.token = result["token"]
+        # tRPC 返回格式：{'json': {'token': ..., 'expiresAt': ...}}
+        token_data = result.get("json", result)
+        if token_data.get("token"):
+            self.token = token_data["token"]
             self.session = create_session(self.server_url, self.token)
-            save_token(result["token"], result.get("expiresAt", ""))
+            save_token(token_data["token"], token_data.get("expiresAt", ""))
             logger.info("认证成功")
         return result
 
@@ -439,9 +441,9 @@ class ExamController:
         # 向服务端认证
         print(f"\n[认证] 正在向服务端认证 ({self.api.server_url})...")
         try:
-            result = self.api.authenticate(username, device_id)
-            if result.get("token"):
-                print(f"[认证] 认证成功！欢迎, {result.get('studentName', username)}")
+            result = self.api.authenticate(username, device_id, username)
+            if result.get("json", result).get("token"):
+                print(f"[认证] 认证成功！欢迎, {result.get('json', result).get('name', username)}")
                 return True
             else:
                 print(f"[认证] 认证失败: {result.get('message', '未知错误')}")

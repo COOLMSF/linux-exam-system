@@ -223,9 +223,10 @@ export async function drawRandomQuestions(count: number, categoryIds?: number[])
   if (categoryIds && categoryIds.length > 0) {
     conditions.push(inArray(questions.categoryId, categoryIds));
   }
+  // Use RANDOM() for MariaDB/MySQL compatibility
   return db.select().from(questions)
     .where(and(...conditions))
-    .orderBy(sql`RAND()`)
+    .orderBy(sql`RANDOM()`)
     .limit(count);
 }
 

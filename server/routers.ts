@@ -272,7 +272,7 @@ const clientRouter = router({
   fetchQuestions: publicProcedure.input(z.object({
     token: z.string(),
     examId: z.number(),
-  })).query(async ({ input }) => {
+  })).mutation(async ({ input }) => {
     const student = await validateToken(input.token);
     const exam = await getExamSessionById(input.examId);
     if (!exam || exam.status !== "active") {

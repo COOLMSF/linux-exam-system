@@ -1,4 +1,5 @@
 import DashboardLayout from "@/components/DashboardLayout";
+import { PageHeader } from "@/components/PageHeader";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { trpc } from "@/lib/trpc";
@@ -10,15 +11,15 @@ function StatCard({ title, value, icon: Icon, color, sub }: {
 }) {
   return (
     <Card className="border-0 shadow-sm bg-card">
-      <CardContent className="p-6">
-        <div className="flex items-start justify-between">
-          <div>
-            <p className="text-sm text-muted-foreground mb-1">{title}</p>
-            <p className="text-3xl font-bold text-foreground">{value}</p>
-            {sub && <p className="text-xs text-muted-foreground mt-1">{sub}</p>}
+      <CardContent className="p-4">
+        <div className="flex items-center justify-between">
+          <div className="min-w-0">
+            <p className="text-xs text-muted-foreground mb-0.5">{title}</p>
+            <p className="text-2xl font-bold text-foreground truncate">{value}</p>
+            {sub && <p className="text-xs text-muted-foreground mt-0.5 truncate">{sub}</p>}
           </div>
-          <div className={`h-12 w-12 rounded-xl flex items-center justify-center ${color}`}>
-            <Icon className="h-6 w-6" />
+          <div className={`h-10 w-10 rounded-lg flex items-center justify-center shrink-0 ${color}`}>
+            <Icon className="h-5 w-5" />
           </div>
         </div>
       </CardContent>
@@ -44,13 +45,14 @@ export default function Dashboard() {
     <DashboardLayout>
       <div className="space-y-6">
         {/* Header */}
-        <div>
-          <h1 className="text-2xl font-bold text-foreground">控制台</h1>
-          <p className="text-muted-foreground mt-1">Linux 考试系统管理概览</p>
-        </div>
+        <PageHeader
+          title="控制台"
+          description="Linux 考试系统管理概览"
+          showDashboardLink={false}
+        />
 
-        {/* Stats */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Stats - Compact Grid */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <StatCard title="题库总量" value={questions?.length ?? 0} icon={BookOpen}
             color="bg-blue-50 text-blue-600 dark:bg-blue-900/20 dark:text-blue-400" sub="道题目" />
           <StatCard title="学生总数" value={students?.length ?? 0} icon={Users}

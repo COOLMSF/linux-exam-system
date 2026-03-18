@@ -1,4 +1,5 @@
 import DashboardLayout from "@/components/DashboardLayout";
+import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -67,20 +68,20 @@ export default function Questions() {
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold">题库管理</h1>
-            <p className="text-muted-foreground mt-1">管理考试题目，支持用户名占位符 <code className="bg-muted px-1 rounded text-xs">{"{{username}}"}</code></p>
-          </div>
-          <div className="flex gap-2">
-            <Button variant="outline" size="sm" onClick={() => setShowCatForm(true)}>
-              <Tag className="h-4 w-4 mr-1.5" /> 管理分类
-            </Button>
-            <Button size="sm" onClick={openCreate}>
-              <Plus className="h-4 w-4 mr-1.5" /> 添加题目
-            </Button>
-          </div>
-        </div>
+        <PageHeader
+          title="题库管理"
+          description="管理考试题目，支持用户名占位符 {{username}}"
+          actions={
+            <div className="flex gap-2">
+              <Button variant="outline" size="sm" onClick={() => setShowCatForm(true)}>
+                <Tag className="h-4 w-4 mr-1.5" /> 管理分类
+              </Button>
+              <Button size="sm" onClick={openCreate}>
+                <Plus className="h-4 w-4 mr-1.5" /> 添加题目
+              </Button>
+            </div>
+          }
+        />
 
         {/* Filters */}
         <div className="flex gap-3 flex-wrap">

@@ -1,4 +1,5 @@
 import DashboardLayout from "@/components/DashboardLayout";
+import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -61,15 +62,15 @@ export default function ScoringRules() {
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold">评分规则配置</h1>
-            <p className="text-muted-foreground mt-1">可视化配置评分标准，自动生成 Shell 评分脚本</p>
-          </div>
-          <Button size="sm" onClick={() => { setRuleForm({ questionId: "", name: "", description: "", initialScore: "10" }); setShowRuleForm(true); }}>
-            <Plus className="h-4 w-4 mr-1.5" /> 新建规则
-          </Button>
-        </div>
+        <PageHeader
+          title="评分规则配置"
+          description="可视化配置评分标准，自动生成 Shell 评分脚本"
+          actions={
+            <Button size="sm" onClick={() => { setRuleForm({ questionId: "", name: "", description: "", initialScore: "10" }); setShowRuleForm(true); }}>
+              <Plus className="h-4 w-4 mr-1.5" /> 新建规则
+            </Button>
+          }
+        />
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Rules List */}

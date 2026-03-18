@@ -1,4 +1,5 @@
 import DashboardLayout from "@/components/DashboardLayout";
+import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -43,15 +44,15 @@ export default function Exams() {
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold">考试管理</h1>
-            <p className="text-muted-foreground mt-1">创建考试场次，控制考试状态，监控考试进度</p>
-          </div>
-          <Button size="sm" onClick={() => { setForm({ name: "", description: "", durationMinutes: "120", questionCount: "9" }); setShowForm(true); }}>
-            <Plus className="h-4 w-4 mr-1.5" /> 创建考试
-          </Button>
-        </div>
+        <PageHeader
+          title="考试管理"
+          description="创建考试场次，控制考试状态，监控考试进度"
+          actions={
+            <Button size="sm" onClick={() => { setForm({ name: "", description: "", durationMinutes: "120", questionCount: "9" }); setShowForm(true); }}>
+              <Plus className="h-4 w-4 mr-1.5" /> 创建考试
+            </Button>
+          }
+        />
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Exam List */}

@@ -13,9 +13,10 @@
 3. [达梦数据库 DM8 适配配置](#3-达梦数据库-dm8-适配配置)
 4. [前端管理系统部署](#4-前端管理系统部署)
 5. [客户端 Agent 部署（麒麟桌面版）](#5-客户端-agent-部署)
-6. [PyInstaller 打包指南](#6-pyinstaller-打包指南)
-7. [评分规则配置指南](#7-评分规则配置指南)
-8. [系统运维与故障排查](#8-系统运维与故障排查)
+6. [自动化打包指南](#6-自动化打包指南)
+7. [PyInstaller 手动打包指南](#7-pyinstaller-手动打包指南)
+8. [评分规则配置指南](#8-评分规则配置指南)
+9. [系统运维与故障排查](#9-系统运维与故障排查)
 
 ---
 
@@ -358,9 +359,86 @@ exam_agent
 
 ---
 
-## 6. PyInstaller 打包指南
+## 6. 自动化打包指南
 
-### 6.1 环境准备（在麒麟系统上打包）
+使用 `install.sh` 脚本自动打包客户端和服务端，用于分发部署。
+
+### 6.1 打包客户端 Agent
+
+```bash
+# 打包客户端（生成可执行文件）
+bash install.sh --package-client
+
+# 打包产物
+dist/
+├── exam_agent          # Linux 可执行文件
+└── README.txt          # 使用说明
+```
+
+### 8.2 打包服务端
+
+```bash
+# 打包服务端（生成部署包）
+bash install.sh --package-server
+
+# 打包产物
+dist/
+└── linux-exam-server/
+    ├── deploy.sh       # 服务端部署脚本
+    ├── README.txt      # 部署说明
+    └── ...             # 服务端文件
+```
+
+### 8.3 打包全部（客户端 + 服务端）
+
+```bash
+# 打包全部用于分发
+bash install.sh --package-all
+
+# 打包产物
+dist/
+├── release/
+│   ├── exam_agent              # 客户端可执行文件
+│   ├── linux-exam-server/      # 服务端部署目录
+│   └── RELEASE_NOTES.txt       # 分发说明
+└── linux-exam-system_v1.0.0_YYYYMMDD_HHMMSS.tar.gz  # 最终分发包
+```
+
+### 8.4 制作分发包
+
+```bash
+# 客户端分发包
+cd dist
+tar -czf exam_agent_v1.0.0_kylin_x64.tar.gz exam_agent README.txt
+
+# 服务端分发包
+tar -czf linux-exam-server_v1.0.0.tar.gz linux-exam-server
+
+# 完整分发包（使用 --package-all 后）
+tar -czf linux-exam-system_v1.0.0_$(date +%Y%m%d_%H%M%S).tar.gz -C dist release
+```
+
+### 8.5 分发方式
+
+**客户端 Agent 分发**：
+- 共享网络目录
+- USB 拷贝
+- SSH 批量部署：
+  ```bash
+  for host in 192.168.1.{101..150}; do
+    scp exam_agent.tar.gz user@$host:/tmp/
+  done
+  ```
+
+**服务端分发**：
+- 上传 `linux-exam-server` 目录到服务器
+- 执行 `sudo bash deploy.sh` 完成部署
+
+---
+
+## 8. PyInstaller 手动打包指南
+
+### 8.1 环境准备（在麒麟系统上打包）
 
 ```bash
 # 安装 Python 依赖
@@ -370,7 +448,7 @@ pip3 install pyinstaller requests
 cd client_agent
 ```
 
-### 6.2 执行打包
+### 8.2 执行打包
 
 ```bash
 # 方法一：使用 spec 文件（推荐）
@@ -386,14 +464,14 @@ pyinstaller \
     exam_agent.py
 ```
 
-### 6.3 打包产物
+### 8.3 打包产物
 
 ```
 dist/
 └── exam_agent          # Linux 可执行文件（约 8-15MB）
 ```
 
-### 6.4 验证打包结果
+### 8.4 验证打包结果
 
 ```bash
 # 测试可执行文件
@@ -404,7 +482,7 @@ dist/
 ldd dist/exam_agent
 ```
 
-### 6.5 分发方案
+### 8.5 分发方案
 
 ```bash
 # 创建分发包
@@ -427,15 +505,15 @@ wait
 
 ---
 
-## 7. 评分规则配置指南
+## 8. 评分规则配置指南
 
-### 7.1 配置流程
+### 8.1 配置流程
 
 ```
 管理员登录 → 评分规则页面 → 新建规则 → 添加检查项 → 查看生成脚本
 ```
 
-### 7.2 检查项类型说明
+### 8.2 检查项类型说明
 
 | 类型 | 说明 | 示例 |
 |------|------|------|
@@ -445,7 +523,7 @@ wait
 | `db_query` | 执行 SQL 文件并检查结果 | 检查表、视图、存储过程是否存在 |
 | `custom_script` | 执行自定义 Shell 脚本 | 复杂的多步骤检查逻辑 |
 
-### 7.3 SQL 检查文件规范
+### 8.3 SQL 检查文件规范
 
 数据库查询检查依赖预置的 SQL 文件，存放在 `/var/local/sc/` 目录：
 
@@ -465,7 +543,7 @@ SELECT TABLE_NAME FROM ALL_TABLES WHERE OWNER = 'EXAM_ADMIN';
 EOF
 ```
 
-### 7.4 用户名占位符
+### 8.4 用户名占位符
 
 在检查目标中使用 `{{username}}` 占位符，系统会自动替换为当前学生的系统用户名：
 
@@ -476,9 +554,9 @@ SQL文件路径: /var/local/sc/rw_user_{{username}}.sql
 
 ---
 
-## 8. 系统运维与故障排查
+## 9. 系统运维与故障排查
 
-### 8.1 常见问题
+### 9.1 常见问题
 
 **问题1：客户端认证失败**
 ```
@@ -508,7 +586,7 @@ SQL文件路径: /var/local/sc/rw_user_{{username}}.sql
   firewall-cmd --reload
 ```
 
-### 8.2 日志查看
+### 9.2 日志查看
 
 ```bash
 # 服务端日志
@@ -521,7 +599,7 @@ tail -f ~/.exam_agent/logs/agent_$(date +%Y%m%d).log
 ls -la ~/.exam_agent/logs/score_backup_*.json
 ```
 
-### 8.3 防火墙配置
+### 9.3 防火墙配置
 
 ```bash
 # 麒麟系统（基于 firewalld）
@@ -533,7 +611,7 @@ sudo firewall-cmd --reload
 sudo firewall-cmd --list-ports
 ```
 
-### 8.4 性能调优
+### 9.4 性能调优
 
 ```bash
 # Node.js 内存限制（大型考试场景）

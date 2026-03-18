@@ -1,4 +1,5 @@
 import DashboardLayout from "@/components/DashboardLayout";
+import { PageHeader } from "@/components/PageHeader";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -138,26 +139,26 @@ export default function Reports() {
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        <div className="flex items-center justify-between flex-wrap gap-3">
-          <div>
-            <h1 className="text-2xl font-bold">成绩报表</h1>
-            <p className="text-muted-foreground mt-1">可视化成绩分析，支持 CSV 导出</p>
-          </div>
-          <div className="flex items-center gap-3">
-            <Select value={selectedExam} onValueChange={setSelectedExam}>
-              <SelectTrigger className="w-52">
-                <SelectValue placeholder="选择考试场次" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">全部考试</SelectItem>
-                {(exams ?? []).map(e => <SelectItem key={e.id} value={String(e.id)}>{e.name}</SelectItem>)}
-              </SelectContent>
-            </Select>
-            <Button variant="outline" size="sm" onClick={exportCSV}>
-              <Download className="h-4 w-4 mr-1.5" /> 导出 CSV
-            </Button>
-          </div>
-        </div>
+        <PageHeader
+          title="成绩报表"
+          description="可视化成绩分析，支持 CSV 导出"
+          actions={
+            <div className="flex items-center gap-3">
+              <Select value={selectedExam} onValueChange={setSelectedExam}>
+                <SelectTrigger className="w-52">
+                  <SelectValue placeholder="选择考试场次" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">全部考试</SelectItem>
+                  {(exams ?? []).map(e => <SelectItem key={e.id} value={String(e.id)}>{e.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+              <Button variant="outline" size="sm" onClick={exportCSV}>
+                <Download className="h-4 w-4 mr-1.5" /> 导出 CSV
+              </Button>
+            </div>
+          }
+        />
 
         {/* Summary Stats */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
