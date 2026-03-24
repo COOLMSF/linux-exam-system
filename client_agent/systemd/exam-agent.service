@@ -1,0 +1,16 @@
+[Unit]
+Description=Linux Exam Student Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/opt/exam-agent
+ExecStart=/usr/bin/python3 /opt/exam-agent/exam_agent.py --auto
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

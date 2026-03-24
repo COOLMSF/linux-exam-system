@@ -21,7 +21,7 @@ import {
 } from "@/components/ui/sidebar";
 import { getLoginUrl } from "@/const";
 import { useIsMobile } from "@/hooks/useMobile";
-import { LayoutDashboard, LogOut, PanelLeft, Users, BookOpen, ClipboardList, Settings2, BarChart3, GraduationCap } from "lucide-react";
+import { LayoutDashboard, LogOut, PanelLeft, Users, BookOpen, ClipboardList, Settings2, BarChart3, GraduationCap, Activity } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from './DashboardLayoutSkeleton';
@@ -32,6 +32,7 @@ const menuItems = [
   { icon: BookOpen, label: "题库管理", path: "/questions" },
   { icon: GraduationCap, label: "学生管理", path: "/students" },
   { icon: ClipboardList, label: "考试管理", path: "/exams" },
+  { icon: Activity, label: "实时监控", path: "/exam-ops" },
   { icon: Settings2, label: "评分规则", path: "/scoring-rules" },
   { icon: BarChart3, label: "成绩报表", path: "/reports" },
 ];

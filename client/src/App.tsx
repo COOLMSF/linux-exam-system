@@ -11,6 +11,7 @@ import Students from "./pages/Students";
 import Exams from "./pages/Exams";
 import ScoringRules from "./pages/ScoringRules";
 import Reports from "./pages/Reports";
+import ExamOpsCenter from "./pages/ExamOpsCenter";
 
 function Router() {
   return (
@@ -22,6 +23,7 @@ function Router() {
       <Route path="/exams" component={Exams} />
       <Route path="/scoring-rules" component={ScoringRules} />
       <Route path="/reports" component={Reports} />
+      <Route path="/exam-ops" component={ExamOpsCenter} />
       <Route path="/404" component={NotFound} />
       <Route component={NotFound} />
     </Switch>

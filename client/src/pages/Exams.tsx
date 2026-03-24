@@ -18,6 +18,7 @@ const STATUS_CONFIG = {
   paused: { label: "已暂停", color: "badge-paused", icon: Pause },
   ended:  { label: "已结束", color: "badge-ended",  icon: Square },
 };
+type ExamStatus = keyof typeof STATUS_CONFIG;
 
 export default function Exams() {
   const utils = trpc.useUtils();
@@ -65,7 +66,8 @@ export default function Exams() {
                 <CardContent className="py-10 text-center text-muted-foreground text-sm">暂无考试场次</CardContent>
               </Card>
             ) : (exams ?? []).map(exam => {
-              const sc = STATUS_CONFIG[exam.status];
+              const status = (exam.status in STATUS_CONFIG ? exam.status : "draft") as ExamStatus;
+              const sc = STATUS_CONFIG[status];
               const isSelected = selectedExam === exam.id;
               return (
                 <Card key={exam.id}

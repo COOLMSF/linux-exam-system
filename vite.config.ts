@@ -168,6 +168,7 @@ const plugins = [react(), tailwindcss(), jsxLocPlugin(), vitePluginManusRuntime(
 export default defineConfig({
   plugins,
   resolve: {
+    dedupe: ["react", "react-dom"],
     alias: {
       "@": path.resolve(PROJECT_ROOT, "client", "src"),
       "@shared": path.resolve(PROJECT_ROOT, "shared"),
