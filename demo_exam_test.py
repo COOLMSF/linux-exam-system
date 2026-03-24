@@ -288,32 +288,32 @@ process.exit(0);
     return result.returncode == 0
 
 def run_demo_exam():
-    """运行演示考试"""
-    log_section("运行演示考试")
-    
+    """运行演示考试（自动评分模式）"""
+    log_section("运行演示考试（自动评分）")
+
     server_url = "http://localhost:3000"
     exam_id = 1
-    
-    print("\n[演示] 开始考试流程测试\n")
-    
+
+    print("\n[演示] 开始考试流程测试（自动模式）\n")
+
     # 1. 获取系统信息
     sys_info = get_system_info()
     username = sys_info["username"]
     device_id = sys_info["device_id"]
-    
+
     print(f"  当前用户：{username}")
     print(f"  设备 ID: {device_id[:16]}...")
-    
+
     # 2. 清除旧 token
     token_file = os.path.expanduser("~/.exam_agent/token.json")
     if os.path.exists(token_file):
         os.remove(token_file)
         log_info("已清除旧 token")
-    
+
     # 3. 认证
     print("\n[演示] 正在认证...")
     api = ExamAPIClient(server_url)
-    
+
     try:
         result = api.authenticate(username, device_id, username)
         token_data = result.get("json", result)
@@ -325,7 +325,7 @@ def run_demo_exam():
     except Exception as e:
         log_error(f"认证异常：{e}")
         return False
-    
+
     # 4. 获取考试题目
     print(f"\n[演示] 获取考试题目 (examId={exam_id})...")
     try:
@@ -333,18 +333,18 @@ def run_demo_exam():
             "token": api.token,
             "examId": exam_id
         }, method="POST")
-        
+
         questions = questions_data.get("questions", [])
         log_ok(f"获取到 {len(questions)} 道题目")
-        
+
         for i, q in enumerate(questions, 1):
             print(f"    题目 {i}: {q.get('title', 'Unknown')} ({q.get('maxScore', 0)}分)")
-            
+
     except Exception as e:
         log_error(f"获取题目失败：{e}")
         print(f"  提示：请确保考试场次已创建并处于 active 状态")
         return False
-    
+
     # 5. 开始考试
     print(f"\n[演示] 开始考试...")
     try:
@@ -356,28 +356,28 @@ def run_demo_exam():
     except Exception as e:
         log_error(f"开始考试失败：{e}")
         return False
-    
-    # 6. 执行评分
-    print(f"\n[演示] 执行评分...")
+
+    # 6. 执行评分（自动模式）
+    print(f"\n[演示] 执行自动评分...")
     executor = ScriptExecutor(timeout=60)
     all_results = []
     total_score = 0
     total_max = 0
-    
+
     for i, q in enumerate(questions, 1):
         script = q.get("scoringScript")
         if not script:
             print(f"  题目 {i}: 无评分脚本，跳过")
             continue
-        
+
         print(f"  评分题目 {i}: {q.get('title')}...")
         result = executor.execute_script(script, username)
-        
+
         q_score = result.get("totalScore", 0)
         q_max = q.get("maxScore", 10)
         total_score += q_score
         total_max += q_max
-        
+
         all_results.append({
             "questionId": q.get("id"),
             "questionTitle": q.get("title"),
@@ -385,11 +385,11 @@ def run_demo_exam():
             "maxScore": q_max,
             "details": result.get("details", []),
         })
-        
+
         print(f"    得分：{q_score} / {q_max}")
-    
+
     print(f"\n[演示] 评分完成！总分：{total_score} / {total_max}")
-    
+
     # 7. 提交成绩
     print(f"\n[演示] 提交成绩...")
     try:
@@ -397,7 +397,7 @@ def run_demo_exam():
             "token": api.token,
             "examId": exam_id,
             "totalScore": total_score,
-            "durationSeconds": 300,
+            "durationSeconds": 60,
             "scriptOutput": json.dumps(all_results, ensure_ascii=False),
             "details": [{
                 "questionId": q.get("id"),
@@ -406,18 +406,29 @@ def run_demo_exam():
                 "failedChecks": []
             } for q in all_results]
         }
-        
+
         result = api._call("agentApi.submitScore", submit_data, method="POST")
         log_ok("成绩已提交")
     except Exception as e:
         log_error(f"提交成绩失败：{e}")
         return False
-    
+
+    # 8. 结束考试
+    print(f"\n[演示] 结束考试...")
+    try:
+        result = api._call("agentApi.finishExam", {
+            "recordId": record_id
+        }, method="POST")
+        log_ok("考试已结束")
+    except Exception as e:
+        log_warn(f"结束考试失败：{e}")
+
     print(f"\n{'='*60}")
     print(f"  考试完成！")
     print(f"  最终得分：{total_score} / {total_max}")
+    print(f"  考试记录 ID: {record_id}")
     print(f"{'='*60}")
-    
+
     return True
 
 def main():

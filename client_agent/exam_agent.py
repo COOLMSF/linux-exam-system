@@ -3,7 +3,7 @@
 """
 Linux 考试系统 - 客户端 Agent
 适配麒麟操作系统 (KylinOS)
-版本: 1.0.0
+版本: 1.1.0 (支持 score.sh 评分格式)
 """
 
 import os
@@ -12,13 +12,12 @@ import json
 import time
 import getpass
 import subprocess
-import tempfile
 import hashlib
 import platform
 import socket
 import logging
 import argparse
-import threading
+import re
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any, List
@@ -29,11 +28,11 @@ try:
     from requests.adapters import HTTPAdapter
     from urllib3.util.retry import Retry
 except ImportError:
-    print("[错误] 缺少依赖库 requests，请运行: pip3 install requests")
+    print("[错误] 缺少依赖库 requests，请运行：pip3 install requests")
     sys.exit(1)
 
 # ─────────────────────────────────────────────
-# 配置区域（可通过命令行参数或配置文件覆盖）
+# 配置区域
 # ─────────────────────────────────────────────
 DEFAULT_SERVER_URL = "http://localhost:3000"
 CONFIG_FILE = Path.home() / ".exam_agent" / "config.json"
@@ -74,7 +73,7 @@ def create_session(server_url: str, token: Optional[str] = None) -> requests.Ses
     session.mount("https://", adapter)
     session.headers.update({
         "Content-Type": "application/json",
-        "User-Agent": f"ExamAgent/1.0 ({platform.system()}; {platform.machine()})",
+        "User-Agent": f"ExamAgent/1.1 ({platform.system()}; {platform.machine()})",
     })
     if token:
         session.headers.update({"Authorization": f"Bearer {token}"})
@@ -96,17 +95,12 @@ def get_device_id() -> str:
     """生成唯一设备标识（基于主机名和 MAC 地址）"""
     try:
         hostname = socket.gethostname()
-        mac = hex(uuid_getnode())[2:].upper()
+        import uuid
+        mac = hex(uuid.getnode())[2:].upper()
         raw = f"{hostname}-{mac}"
         return hashlib.sha256(raw.encode()).hexdigest()[:32]
     except Exception:
         return hashlib.sha256(platform.node().encode()).hexdigest()[:32]
-
-
-def uuid_getnode() -> int:
-    """获取 MAC 地址数字"""
-    import uuid
-    return uuid.getnode()
 
 
 def get_system_info() -> Dict[str, str]:
@@ -129,7 +123,7 @@ def save_token(token: str, expires_at: str) -> None:
     TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(TOKEN_FILE, "w", encoding="utf-8") as f:
         json.dump({"token": token, "expires_at": expires_at}, f)
-    logger.info(f"Token 已保存，过期时间: {expires_at}")
+    logger.info(f"Token 已保存，过期时间：{expires_at}")
 
 
 def load_token() -> Optional[str]:
@@ -145,7 +139,7 @@ def load_token() -> Optional[str]:
         logger.info("本地 Token 已过期，需要重新认证")
         return None
     except Exception as e:
-        logger.warning(f"加载 Token 失败: {e}")
+        logger.warning(f"加载 Token 失败：{e}")
         return None
 
 
@@ -186,7 +180,7 @@ class ExamAPIClient:
                 if resp.status_code == 403:
                     raise PermissionError("权限不足")
                 if resp.status_code == 404:
-                    raise APIError(f"接口不存在: {procedure}")
+                    raise APIError(f"接口不存在：{procedure}")
 
                 resp.raise_for_status()
                 result = resp.json()
@@ -195,11 +189,11 @@ class ExamAPIClient:
                 if isinstance(result, list) and len(result) > 0:
                     item = result[0]
                     if "error" in item:
-                        raise APIError(f"服务端错误: {item['error'].get('message', '未知错误')}")
+                        raise APIError(f"服务端错误：{item['error'].get('message', '未知错误')}")
                     return item.get("result", {}).get("data", {})
                 elif isinstance(result, dict):
                     if "error" in result:
-                        raise APIError(f"服务端错误: {result['error'].get('message', '未知错误')}")
+                        raise APIError(f"服务端错误：{result['error'].get('message', '未知错误')}")
                     return result.get("result", {}).get("data", result)
                 return result
 
@@ -219,17 +213,16 @@ class ExamAPIClient:
                 else:
                     raise NetworkError("请求超时，请检查网络连接")
             except Exception as e:
-                raise APIError(f"API 调用失败: {e}")
+                raise APIError(f"API 调用失败：{e}")
 
     def authenticate(self, student_id: str, device_id: str, client_username: str) -> Dict[str, Any]:
         """客户端身份认证，获取 Token"""
-        logger.info(f"正在认证用户: {student_id}")
+        logger.info(f"正在认证用户：{student_id}")
         result = self._call(
             "agentApi.authenticate",
             {"studentId": student_id, "deviceId": device_id, "clientUsername": client_username},
             method="POST"
         )
-        # tRPC 返回格式：{'json': {'token': ..., 'expiresAt': ...}}
         token_data = result.get("json", result)
         if token_data.get("token"):
             self.token = token_data["token"]
@@ -238,28 +231,35 @@ class ExamAPIClient:
             logger.info("认证成功")
         return result
 
-    def get_exam(self) -> Optional[Dict[str, Any]]:
-        """获取当前进行中的考试信息"""
-        return self._call("agentApi.getActiveExam", method="GET")
+    def fetch_questions(self, exam_id: int) -> Dict[str, Any]:
+        """获取考试题目"""
+        logger.info(f"正在获取考试题目 (examId={exam_id})")
+        result = self._call("agentApi.fetchQuestions", {"examId": exam_id}, method="POST")
+        return result
 
-    def get_questions(self, exam_id: int) -> List[Dict[str, Any]]:
-        """从服务端抽取题目（用户名已替换）"""
-        logger.info(f"正在抽取考试题目 (examId={exam_id})")
-        result = self._call("agentApi.getQuestions", {"examId": exam_id}, method="POST")
-        questions = result.get("questions", [])
-        logger.info(f"获取到 {len(questions)} 道题目")
-        return questions
-
-    def start_exam(self, exam_id: int) -> Dict[str, Any]:
-        """开始考试，创建考试记录"""
-        return self._call("agentApi.startExam", {"examId": exam_id}, method="POST")
-
-    def submit_score(self, record_id: int, score_data: Dict[str, Any]) -> Dict[str, Any]:
-        """上传评分结果到服务端"""
-        logger.info(f"正在上传成绩 (recordId={record_id}, score={score_data.get('totalScore')})")
+    def submit_score(self, token: str, exam_id: int, total_score: int, duration_seconds: int,
+                     script_output: str, details: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """提交成绩"""
+        logger.info(f"正在提交成绩 (examId={exam_id}, score={total_score})")
         return self._call(
             "agentApi.submitScore",
-            {"recordId": record_id, "scoreData": score_data},
+            {
+                "token": token,
+                "examId": exam_id,
+                "totalScore": total_score,
+                "durationSeconds": duration_seconds,
+                "scriptOutput": script_output,
+                "details": details,
+            },
+            method="POST"
+        )
+
+    def finish_exam(self, record_id: int) -> Dict[str, Any]:
+        """结束考试"""
+        logger.info(f"正在结束考试 (recordId={record_id})")
+        return self._call(
+            "agentApi.finishExam",
+            {"recordId": record_id},
             method="POST"
         )
 
@@ -276,7 +276,7 @@ class APIError(Exception): pass
 # 评分脚本执行器
 # ─────────────────────────────────────────────
 class ScriptExecutor:
-    """执行评分脚本并解析结果"""
+    """执行评分脚本并解析结果（支持 score.sh 格式）"""
 
     def __init__(self, timeout: int = 300):
         self.timeout = timeout
@@ -284,19 +284,17 @@ class ScriptExecutor:
     def execute_script(self, script_content: str, username: str) -> Dict[str, Any]:
         """
         执行 Shell 评分脚本
-        返回: {"totalScore": int, "details": [...], "rawOutput": str}
+        返回：{"totalScore": int, "questionScores": dict, "details": [...], "rawOutput": str}
         """
-        # 将脚本写入临时文件
         script_file = SCRIPT_DIR / f"score_{int(time.time())}.sh"
         try:
-            # 替换用户名占位符
             script_content = script_content.replace("{{username}}", username)
 
             with open(script_file, "w", encoding="utf-8", newline="\n") as f:
                 f.write(script_content)
             os.chmod(script_file, 0o755)
 
-            logger.info(f"执行评分脚本: {script_file}")
+            logger.info(f"执行评分脚本：{script_file}")
             start_time = time.time()
 
             result = subprocess.run(
@@ -308,19 +306,18 @@ class ScriptExecutor:
             )
 
             elapsed = time.time() - start_time
-            logger.info(f"脚本执行完成，耗时 {elapsed:.1f}s，返回码: {result.returncode}")
+            logger.info(f"脚本执行完成，耗时 {elapsed:.1f}s，返回码：{result.returncode}")
 
             output = result.stdout + result.stderr
             return self._parse_output(output, result.returncode)
 
         except subprocess.TimeoutExpired:
             logger.error(f"评分脚本执行超时 ({self.timeout}s)")
-            return {"totalScore": 0, "details": [], "rawOutput": "脚本执行超时", "error": "timeout"}
+            return {"totalScore": 0, "questionScores": {}, "details": [], "rawOutput": "脚本执行超时", "error": "timeout"}
         except Exception as e:
-            logger.error(f"脚本执行失败: {e}")
-            return {"totalScore": 0, "details": [], "rawOutput": str(e), "error": str(e)}
+            logger.error(f"脚本执行失败：{e}")
+            return {"totalScore": 0, "questionScores": {}, "details": [], "rawOutput": str(e), "error": str(e)}
         finally:
-            # 清理临时脚本文件
             try:
                 script_file.unlink(missing_ok=True)
             except Exception:
@@ -328,40 +325,60 @@ class ScriptExecutor:
 
     def _parse_output(self, output: str, returncode: int) -> Dict[str, Any]:
         """
-        解析脚本输出，提取分数和详情
-        支持两种输出格式：
-        1. JSON 格式: {"totalScore": 85, "details": [...]}
-        2. 文本格式: 最后一行为总分数字，或包含 "总分:" 关键字
+        解析脚本输出，支持三种格式：
+        1. JSON 格式：{"totalScore": 85, "details": [...]}
+        2. score.sh 格式：***第 X 题...得分***:N 和 总得分：N
+        3. 文本格式：扣分行和总分数字
         """
         output = output.strip()
         details = []
         total_score = 0
+        question_scores = {}
 
-        # 尝试 JSON 格式解析
+        # 尝试 JSON 格式解析（优先）
         try:
-            # 查找 JSON 块
-            json_start = output.rfind("{")
+            # 查找完整的 JSON 对象（从第一个 { 到最后一个 }）
+            json_start = output.find("{")
             json_end = output.rfind("}") + 1
             if json_start >= 0 and json_end > json_start:
                 json_str = output[json_start:json_end]
                 data = json.loads(json_str)
-                if "totalScore" in data:
+                # 确保是有效的评分 JSON（包含 totalScore 字段）
+                if isinstance(data, dict) and "totalScore" in data and isinstance(data.get("totalScore"), int):
                     return {
                         "totalScore": int(data["totalScore"]),
+                        "questionScores": {},
                         "details": data.get("details", []),
                         "rawOutput": output,
                         "returnCode": returncode,
                     }
-        except (json.JSONDecodeError, ValueError):
+        except (json.JSONDecodeError, ValueError, TypeError):
             pass
 
-        # 文本格式解析
         lines = output.split("\n")
+
+        # score.sh 格式解析
         for line in lines:
             line = line.strip()
-            # 解析扣分信息（格式: "描述:-分值"）
-            if ":-" in line:
-                parts = line.rsplit(":-", 1)
+            
+            # 解析每道题得分：***第 X 题...得分***:N
+            match = re.search(r'\*\*\*第 (\d+) 题.*?得分\*\*\*:(\d+)', line)
+            if match:
+                question_num = int(match.group(1))
+                score = int(match.group(2))
+                question_scores[question_num] = score
+                continue
+
+            # 解析总得分：总得分：N 或 总得分:N
+            match = re.search(r'总得分 [:：]?\s*(\d+)', line)
+            if match:
+                total_score = int(match.group(1))
+                continue
+
+            # 解析扣分信息（格式："描述:-分值" 或 "描述：-分值"）
+            if ":-" in line or "：-" in line:
+                separator = ":-" if ":-" in line else "：-"
+                parts = line.rsplit(separator, 1)
                 if len(parts) == 2:
                     try:
                         deduction = abs(int(parts[1].strip()))
@@ -373,25 +390,30 @@ class ScriptExecutor:
                     except ValueError:
                         pass
 
-        # 提取总分（查找 "总分:" 或最后一个纯数字行）
-        for line in reversed(lines):
-            line = line.strip()
-            if "总分" in line or "score" in line.lower():
-                import re
-                nums = re.findall(r'\d+', line)
-                if nums:
-                    total_score = int(nums[-1])
-                    break
-            try:
-                val = int(line)
-                if 0 <= val <= 200:
-                    total_score = val
-                    break
-            except ValueError:
-                continue
+        # 如果有题目得分但没有总分，计算总分
+        if question_scores and total_score == 0:
+            total_score = sum(question_scores.values())
+
+        # 如果仍没有总分，尝试从最后一个数字行提取
+        if total_score == 0:
+            for line in reversed(lines):
+                line = line.strip()
+                if "总分" in line or "score" in line.lower() or "得分" in line:
+                    nums = re.findall(r'\d+', line)
+                    if nums:
+                        total_score = int(nums[-1])
+                        break
+                try:
+                    val = int(line)
+                    if 0 <= val <= 200:
+                        total_score = val
+                        break
+                except ValueError:
+                    continue
 
         return {
             "totalScore": total_score,
+            "questionScores": question_scores,
             "details": details,
             "rawOutput": output,
             "returnCode": returncode,
@@ -404,17 +426,22 @@ class ScriptExecutor:
 class ExamController:
     """控制完整考试流程"""
 
-    def __init__(self, server_url: str):
+    def __init__(self, server_url: str, auto_mode: bool = False, exam_id: int = 1):
         self.api = ExamAPIClient(server_url)
         self.executor = ScriptExecutor()
         self.sys_info = get_system_info()
+        self.start_time: Optional[float] = None
+        self.auto_mode = auto_mode  # 自动模式：无需确认直接评分
+        self.exam_id = exam_id  # 考试 ID
 
     def print_banner(self):
         """打印系统横幅"""
-        banner = """
+        mode_str = "自动评分模式" if self.auto_mode else "手动确认模式"
+        banner = f"""
 ╔══════════════════════════════════════════════════════════╗
-║           Linux 考试系统 - 客户端 Agent v1.0.0            ║
-║           适配麒麟操作系统 (KylinOS)                       ║
+║           Linux 考试系统 - 客户端 Agent v1.2              ║
+║           支持 score.sh 评分格式                          ║
+║           模式：{mode_str:<22}                      ║
 ╚══════════════════════════════════════════════════════════╝
 """
         print(banner)
@@ -425,12 +452,11 @@ class ExamController:
         device_id = self.sys_info["device_id"]
 
         print(f"\n[系统信息]")
-        print(f"  当前用户: {username}")
-        print(f"  主机名:   {self.sys_info['hostname']}")
-        print(f"  操作系统: {self.sys_info['os']} {self.sys_info['os_version']}")
-        print(f"  设备ID:   {device_id[:16]}...")
+        print(f"  当前用户：{username}")
+        print(f"  主机名：  {self.sys_info['hostname']}")
+        print(f"  操作系统：{self.sys_info['os']} {self.sys_info['os_version']}")
+        print(f"  设备 ID:  {device_id[:16]}...")
 
-        # 尝试使用本地缓存 Token
         cached_token = load_token()
         if cached_token:
             self.api.token = cached_token
@@ -438,44 +464,72 @@ class ExamController:
             logger.info("使用本地缓存 Token")
             return True
 
-        # 向服务端认证
         print(f"\n[认证] 正在向服务端认证 ({self.api.server_url})...")
         try:
             result = self.api.authenticate(username, device_id, username)
             if result.get("json", result).get("token"):
-                print(f"[认证] 认证成功！欢迎, {result.get('json', result).get('name', username)}")
+                print(f"[认证] 认证成功！欢迎，{result.get('json', result).get('name', username)}")
                 return True
             else:
-                print(f"[认证] 认证失败: {result.get('message', '未知错误')}")
+                print(f"[认证] 认证失败：{result.get('message', '未知错误')}")
                 return False
         except AuthenticationError as e:
-            print(f"[认证] 认证失败: {e}")
+            print(f"[认证] 认证失败：{e}")
             print("[提示] 请联系监考老师确认您的账号已在系统中注册")
             return False
         except NetworkError as e:
-            print(f"[网络] 连接失败: {e}")
+            print(f"[网络] 连接失败：{e}")
             print(f"[提示] 请确认服务器地址 {self.api.server_url} 是否正确，以及网络是否畅通")
             return False
 
     def wait_for_exam(self) -> Optional[Dict[str, Any]]:
         """等待考试开始"""
         print("\n[等待] 正在等待考试开始...")
-        check_interval = 10  # 每10秒检查一次
-        max_wait = 3600  # 最长等待1小时
+        check_interval = 10
+        max_wait = 3600
         elapsed = 0
+
+        # 清除旧 token，强制重新认证
+        if not load_token():
+            # 如果没有有效 token，尝试重新认证
+            if not self.authenticate():
+                return None
 
         while elapsed < max_wait:
             try:
-                exam = self.api.get_exam()
-                if exam and exam.get("id"):
-                    print(f"\n[考试] 发现考试: {exam.get('name', '未命名考试')}")
-                    print(f"       时长: {exam.get('durationMinutes', 0)} 分钟")
-                    print(f"       题目数: {exam.get('questionCount', 0)} 道")
+                # 直接尝试获取考试题目
+                result = self.api._call(
+                    "agentApi.fetchQuestions",
+                    {"token": self.api.token, "examId": self.exam_id},
+                    method="POST"
+                )
+                
+                if result and result.get("questions"):
+                    # 认证成功，返回考试信息
+                    exam = {
+                        "id": self.exam_id,
+                        "name": result.get("examName", f"考试 #{self.exam_id}"),
+                        "durationMinutes": result.get("durationMinutes", 120),
+                        "questionCount": len(result.get("questions", [])),
+                    }
+                    print(f"\n[考试] 发现考试：{exam.get('name', '未命名考试')}")
+                    print(f"       时长：{exam.get('durationMinutes', 0)} 分钟")
+                    print(f"       题目数：{exam.get('questionCount', 0)} 道")
                     return exam
+                    
+            except AuthenticationError:
+                # Token 过期，尝试重新认证
+                print("\n[认证] Token 已过期，正在重新认证...")
+                if not self.authenticate():
+                    return None
+            except APIError as e:
+                # 考试未开始或不存在
+                logger.debug(f"等待考试开始：{e}")
             except NetworkError as e:
-                logger.warning(f"检查考试状态失败: {e}")
+                logger.warning(f"检查考试状态失败：{e}")
+            except Exception as e:
+                logger.debug(f"等待考试：{e}")
 
-            # 显示等待进度
             dots = "." * (elapsed // check_interval % 4 + 1)
             print(f"\r[等待] 考试尚未开始{dots:<4} ({elapsed}s)", end="", flush=True)
             time.sleep(check_interval)
@@ -495,10 +549,15 @@ class ExamController:
             print(q.get("content", ""))
             print()
         print("=" * 60)
-        print("[提示] 请在本机完成以上操作，完成后按 Enter 键开始评分")
+        
+        if not self.auto_mode:
+            print("[提示] 请在本机完成以上操作，完成后按 Enter 键开始评分")
+        else:
+            print("[自动模式] 将在 5 秒后开始自动评分...")
+            time.sleep(5)
 
     def run_scoring(self, questions: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """执行评分流程"""
+        """执行评分流程（支持 score.sh 格式）"""
         username = self.sys_info["username"]
         all_results = []
         total_score = 0
@@ -507,13 +566,13 @@ class ExamController:
         print("\n[评分] 开始执行评分脚本...")
 
         for i, q in enumerate(questions, 1):
-            script = q.get("scoringScript")
-            if not script:
+            scoring_script = q.get("scoringScript")
+            if not scoring_script:
                 logger.warning(f"题目 {q.get('title')} 没有评分脚本，跳过")
                 continue
 
-            print(f"\n[评分] 正在评分第 {i} 题: {q.get('title', '')}...")
-            result = self.executor.execute_script(script, username)
+            print(f"\n[评分] 正在评分第 {i} 题：{q.get('title', '')}...")
+            result = self.executor.execute_script(scoring_script, username)
 
             q_score = result.get("totalScore", 0)
             q_max = q.get("maxScore", 10)
@@ -529,12 +588,12 @@ class ExamController:
                 "rawOutput": result.get("rawOutput", ""),
             })
 
-            print(f"       得分: {q_score} / {q_max}")
+            print(f"       得分：{q_score} / {q_max}")
             for detail in result.get("details", []):
                 if not detail.get("passed", True):
                     print(f"       ✗ {detail.get('description', '')} (-{detail.get('deduction', 0)}分)")
 
-        print(f"\n[评分] 评分完成！总分: {total_score} / {total_max}")
+        print(f"\n[评分] 评分完成！总分：{total_score} / {total_max}")
         return {
             "totalScore": total_score,
             "maxPossibleScore": total_max,
@@ -558,9 +617,10 @@ class ExamController:
         # Step 3: 获取题目
         print("\n[抽题] 正在从服务端获取题目...")
         try:
-            questions = self.api.get_questions(exam["id"])
+            questions_data = self.api.fetch_questions(exam["id"])
+            questions = questions_data.get("questions", [])
         except Exception as e:
-            print(f"[错误] 获取题目失败: {e}")
+            print(f"[错误] 获取题目失败：{e}")
             return 1
 
         if not questions:
@@ -569,35 +629,58 @@ class ExamController:
 
         # Step 4: 开始考试记录
         try:
-            record = self.api.start_exam(exam["id"])
+            record = self.api._call("agentApi.startExam", {"examId": exam["id"]}, method="POST")
             record_id = record.get("recordId")
         except Exception as e:
-            print(f"[错误] 开始考试失败: {e}")
+            print(f"[错误] 开始考试失败：{e}")
             return 1
 
         # Step 5: 显示题目
         self.display_questions(questions)
 
-        # 等待学生确认完成操作
-        print("\n完成所有操作后，请按 Enter 键开始评分...")
-        try:
-            input()
-        except KeyboardInterrupt:
-            print("\n[中断] 考试被中断")
-            return 1
+        # 等待学生确认完成操作（自动模式跳过）
+        if not self.auto_mode:
+            print("\n完成所有操作后，请按 Enter 键开始评分...")
+            try:
+                input()
+            except KeyboardInterrupt:
+                print("\n[中断] 考试被中断")
+                return 1
+        else:
+            print("\n[自动模式] 开始执行评分...")
 
         # Step 6: 执行评分
+        self.start_time = time.time()
         score_data = self.run_scoring(questions)
+        duration_seconds = int(time.time() - self.start_time)
 
         # Step 7: 上传成绩
         print("\n[上传] 正在上传成绩到服务端...")
         max_upload_retries = 5
         for attempt in range(max_upload_retries):
             try:
-                result = self.api.submit_score(record_id, score_data)
+                details = [{
+                    "questionId": r["questionId"],
+                    "earnedScore": r["score"],
+                    "maxScore": r["maxScore"],
+                    "failedChecks": [d["description"] for d in r.get("details", []) if not d.get("passed", True)],
+                } for r in score_data.get("questionResults", [])]
+
+                result = self.api.submit_score(
+                    token=self.api.token,
+                    exam_id=exam["id"],
+                    total_score=score_data["totalScore"],
+                    duration_seconds=duration_seconds,
+                    script_output=json.dumps(score_data, ensure_ascii=False, indent=2),
+                    details=details,
+                )
                 print(f"[完成] 成绩已成功上传！")
-                print(f"       最终得分: {score_data['totalScore']} / {score_data['maxPossibleScore']}")
-                print(f"       提交时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                print(f"       最终得分：{score_data['totalScore']} / {score_data['maxPossibleScore']}")
+                print(f"       提交时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                
+                # Step 8: 结束考试
+                self.finish_exam(exam["id"], record_id)
+                
                 return 0
             except NetworkError as e:
                 if attempt < max_upload_retries - 1:
@@ -606,18 +689,33 @@ class ExamController:
                     time.sleep(wait)
                 else:
                     print(f"[错误] 成绩上传失败，请联系监考老师手动记录成绩")
-                    print(f"       本地成绩: {score_data['totalScore']} / {score_data['maxPossibleScore']}")
-                    # 保存本地备份
+                    print(f"       本地成绩：{score_data['totalScore']} / {score_data['maxPossibleScore']}")
                     backup_file = LOG_DIR / f"score_backup_{int(time.time())}.json"
                     with open(backup_file, "w", encoding="utf-8") as f:
                         json.dump({"recordId": record_id, "scoreData": score_data}, f, ensure_ascii=False, indent=2)
-                    print(f"       成绩已备份至: {backup_file}")
+                    print(f"       成绩已备份至：{backup_file}")
                     return 1
             except Exception as e:
-                print(f"[错误] 上传异常: {e}")
-                return 1
+                print(f"[错误] 上传异常：{e}")
+                return 0
 
-        return 0
+    def finish_exam(self, exam_id: int, record_id: int) -> None:
+        """结束考试，更新考试记录状态"""
+        print("\n[结束] 正在结束考试...")
+        try:
+            # 调用 API 结束考试
+            result = self.api._call(
+                "agentApi.finishExam",
+                {"recordId": record_id},
+                method="POST"
+            )
+            if result:
+                print(f"[完成] 考试已结束，记录 ID: {record_id}")
+            else:
+                print(f"[提示] 考试记录已更新")
+        except Exception as e:
+            print(f"[警告] 结束考试失败：{e}")
+            print("[提示] 考试记录状态可能未更新，但成绩已保存")
 
 
 # ─────────────────────────────────────────────
@@ -650,22 +748,23 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  %(prog)s                          # 使用默认配置启动
+  %(prog)s                          # 使用默认配置启动（手动确认模式）
+  %(prog)s --auto                   # 自动评分模式（无需确认）
   %(prog)s --server http://192.168.1.100:3000  # 指定服务器地址
-  %(prog)s --config                 # 配置服务器地址
+  %(prog)s --config                 # 进入配置模式
   %(prog)s --test-connection        # 测试服务器连接
         """
     )
-    parser.add_argument("--server", "-s", help="服务器地址 (默认: http://localhost:3000)")
+    parser.add_argument("--server", "-s", help="服务器地址 (默认：http://localhost:3000)")
     parser.add_argument("--config", "-c", action="store_true", help="进入配置模式")
     parser.add_argument("--test-connection", "-t", action="store_true", help="测试服务器连接")
-    parser.add_argument("--version", "-v", action="version", version="ExamAgent 1.0.0")
+    parser.add_argument("--auto", "-a", action="store_true", help="自动评分模式（无需按 Enter 确认）")
+    parser.add_argument("--exam-id", "-e", type=int, default=1, help="考试 ID (默认：1)")
+    parser.add_argument("--version", "-v", action="version", version="ExamAgent 1.2")
     args = parser.parse_args()
 
-    # 加载配置
     config = load_config()
 
-    # 配置模式
     if args.config:
         print("=== 配置向导 ===")
         current = config.get("server_url", DEFAULT_SERVER_URL)
@@ -673,15 +772,13 @@ def main():
         if new_url:
             config["server_url"] = new_url
         save_config(config)
-        print(f"配置已保存: {CONFIG_FILE}")
+        print(f"配置已保存：{CONFIG_FILE}")
         return 0
 
-    # 确定服务器地址（优先级：命令行 > 配置文件 > 默认值）
     server_url = args.server or config.get("server_url", DEFAULT_SERVER_URL)
 
-    # 测试连接
     if args.test_connection:
-        print(f"正在测试连接: {server_url}")
+        print(f"正在测试连接：{server_url}")
         try:
             session = create_session(server_url)
             resp = session.get(f"{server_url}/api/trpc/auth.me", timeout=10)
@@ -689,14 +786,13 @@ def main():
                 print(f"[成功] 服务器连接正常 (HTTP {resp.status_code})")
                 return 0
             else:
-                print(f"[警告] 服务器响应异常: HTTP {resp.status_code}")
+                print(f"[警告] 服务器响应异常：HTTP {resp.status_code}")
                 return 1
         except Exception as e:
-            print(f"[失败] 无法连接到服务器: {e}")
+            print(f"[失败] 无法连接到服务器：{e}")
             return 1
 
-    # 运行考试
-    controller = ExamController(server_url)
+    controller = ExamController(server_url, auto_mode=args.auto, exam_id=args.exam_id)
     return controller.run()
 
 

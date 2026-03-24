@@ -21,6 +21,7 @@ import {
   getAssignmentsForStudent,
   getDb,
   getExamRecord,
+  getExamRecordById,
   getExamSessionById,
   getExamStats,
   getQuestionErrorRates,
@@ -353,6 +354,22 @@ const clientRouter = router({
     });
     await saveScoreDetails(record.id, input.details);
     return { success: true };
+  }),
+
+  /** Step 4: Agent finishes exam and updates record status */
+  finishExam: publicProcedure.input(z.object({
+    recordId: z.number(),
+  })).mutation(async ({ input }) => {
+    const record = await getExamRecordById(input.recordId);
+    if (!record) {
+      throw new TRPCError({ code: "NOT_FOUND", message: "Exam record not found" });
+    }
+    // Update exam record to completed status
+    await updateExamRecord(record.id, {
+      status: "completed",
+      completedAt: new Date(),
+    });
+    return { success: true, recordId: input.recordId };
   }),
 
   /** Fetch the generated scoring script for a specific exam question */

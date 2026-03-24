@@ -103,3 +103,4 @@ temp/
 
 # Webdev artifacts (checkpoint zips, migrations, etc.)
 .webdev/
+.mysql_root_pass

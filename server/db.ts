@@ -223,10 +223,10 @@ export async function drawRandomQuestions(count: number, categoryIds?: number[])
   if (categoryIds && categoryIds.length > 0) {
     conditions.push(inArray(questions.categoryId, categoryIds));
   }
-  // Use RANDOM() for MariaDB/MySQL compatibility
+  // Use RAND() for MySQL compatibility (RANDOM() is PostgreSQL)
   return db.select().from(questions)
     .where(and(...conditions))
-    .orderBy(sql`RANDOM()`)
+    .orderBy(sql`RAND()`)
     .limit(count);
 }
 
@@ -351,6 +351,15 @@ export async function getExamRecord(examId: number, studentId: number) {
   if (!db) return undefined;
   const r = await db.select().from(examRecords)
     .where(and(eq(examRecords.examId, examId), eq(examRecords.studentId, studentId)))
+    .limit(1);
+  return r[0];
+}
+
+export async function getExamRecordById(recordId: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const r = await db.select().from(examRecords)
+    .where(eq(examRecords.id, recordId))
     .limit(1);
   return r[0];
 }

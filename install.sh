@@ -51,6 +51,7 @@ for arg in "$@"; do
     --server-only) MODE="server-only" ;;
     --client-only) MODE="client-only" ;;
     --test-only)   MODE="test-only"   ;;
+    --test-score)  MODE="test-score"  ;;
     --dev)         MODE="dev"          ;;
     --start)       MODE="start"        ;;
     --stop)        MODE="stop"         ;;
@@ -73,7 +74,8 @@ for arg in "$@"; do
       echo "  --package-all      打包全部（客户端 + 服务端 + 部署脚本）"
       echo ""
       echo "测试模式（完整考试流程演示）："
-      echo "  --demo-exam        一键测试：创建数据 + 学生答题 + 自动评分"
+      echo "  --demo-exam        一键测试：导入评分规则 + 创建数据 + 学生答题 + score.sh 评分"
+      echo "  --test-score       仅测试 score.sh 评分解析功能"
       echo ""
       echo "运行模式（不需要 root）："
       echo "  --dev           开发模式启动（直接在当前目录运行，无需安装）"
@@ -85,17 +87,22 @@ for arg in "$@"; do
       echo "维护模式（需要 root 权限）："
       echo "  --reset-db      重置数据库（删除所有数据并重新初始化）"
       echo ""
+      echo "环境变量："
+      echo "  MYSQL_ROOT_PASSWORD   MySQL root 密码（数据库初始化时需要）"
+      echo ""
       echo "  --help          显示此帮助"
       echo ""
       echo "示例："
       echo "  sudo bash install.sh                    # 完整安装并启动"
       echo "  bash install.sh --dev                   # 开发模式即刻启动"
       echo "  bash install.sh --test-only             # 验证环境"
+      echo "  bash install.sh --test-score            # 测试 score.sh 评分解析"
       echo "  bash install.sh --package-client        # 打包客户端"
       echo "  bash install.sh --package-server        # 打包服务端"
       echo "  bash install.sh --package-all           # 打包全部用于分发"
-      echo "  bash install.sh --demo-exam             # 演示考试全流程测试"
+      echo "  bash install.sh --demo-exam             # 演示考试全流程测试（含 score.sh）"
       echo "  sudo bash install.sh --reset-db         # 重置数据库（清空所有数据）"
+      echo "  export MYSQL_ROOT_PASSWORD='your_pass' && bash install.sh  # 指定 MySQL 密码"
       exit 0
       ;;
   esac
@@ -104,7 +111,7 @@ done
 # ─── 权限检查 ─────────────────────────────────────────────────────────────────
 check_root() {
   # 以下模式不需要 root
-  if [[ "$MODE" == "test-only" || "$MODE" == "dev" || "$MODE" == "start" || "$MODE" == "stop" || "$MODE" == "status" || "$MODE" == "reset-db" ]]; then
+  if [[ "$MODE" == "test-only" || "$MODE" == "test-score" || "$MODE" == "dev" || "$MODE" == "start" || "$MODE" == "stop" || "$MODE" == "status" || "$MODE" == "reset-db" ]]; then
     return 0
   fi
   if [[ $EUID -ne 0 ]]; then
@@ -441,23 +448,39 @@ install_client_agent() {
 
 # ─── 演示考试测试 ───────────────────────────────────────────────────────────────
 demo_exam_test() {
-  log_section "演示考试系统测试"
-  
+  log_section "演示考试系统测试（含 score.sh 评分）"
+
   local project_dir="$SCRIPT_DIR"
   local test_student="demo_student"
   local test_password="Demo123456"
-  
+
   echo ""
   echo "本测试将模拟完整的考试流程："
-  echo "  1. 创建管理员账号"
-  echo "  2. 创建学生账号"
-  echo "  3. 创建考试题目"
-  echo "  4. 创建考试场次"
-  echo "  5. 启动考试"
-  echo "  6. 学生端参加考试"
-  echo "  7. 提交成绩"
-  echo "  8. 查看成绩报表"
+  echo "  1. 导入 score.sh 评分规则配置"
+  echo "  2. 创建管理员账号"
+  echo "  3. 创建学生账号"
+  echo "  4. 创建考试题目（9 道数据库题）"
+  echo "  5. 创建考试场次"
+  echo "  6. 启动考试"
+  echo "  7. 学生端参加考试"
+  echo "  8. 执行 score.sh 评分"
+  echo "  9. 提交成绩"
+  echo "  10. 查看成绩报表"
   echo ""
+
+  # Step 1: 导入评分规则
+  log_info "导入 score.sh 评分规则配置..."
+  if [[ -f "$project_dir/import_score_rules.py" ]]; then
+    cd "$project_dir"
+    python3 import_score_rules.py
+    if [[ $? -eq 0 ]]; then
+      log_ok "评分规则导入成功"
+    else
+      log_warn "评分规则导入失败，继续执行测试..."
+    fi
+  else
+    log_warn "import_score_rules.py 不存在，跳过评分规则导入"
+  fi
   
   # 检查服务是否运行
   log_info "检查服务状态..."
@@ -742,13 +765,27 @@ for i, q in enumerate(questions, 1):
 run_tests() {
   log_section "运行功能测试"
 
-  # 优先使用项目源码目录，如已安装则使用 INSTALL_DIR
+  # 优先使用项目源码目录
   local test_dir="$SCRIPT_DIR"
-  if [[ -d "$INSTALL_DIR/node_modules" ]]; then
-    test_dir="$INSTALL_DIR"
-  fi
   local pass=0
   local fail=0
+
+  # ── 测试 0：score.sh 评分解析测试 ──
+  echo -n "  [测试 0] score.sh 评分解析测试 ... "
+  if [[ -f "$SCRIPT_DIR/test_score_parser.py" ]]; then
+    local test_output
+    test_output=$(cd "$SCRIPT_DIR" && python3 test_score_parser.py 2>&1)
+    if echo "$test_output" | grep -q "所有测试通过"; then
+      echo -e "${GREEN}PASS${NC} (score.sh 格式解析正确)"
+      ((pass++)) || true
+    else
+      echo -e "${RED}FAIL${NC} (解析测试失败)"
+      echo "$test_output" | tail -10
+      ((fail++)) || true
+    fi
+  else
+    echo -e "${YELLOW}SKIP${NC} (test_score_parser.py 不存在)"
+  fi
 
   # ── 测试 1：Node.js 版本 ──
   echo -n "  [测试 1] Node.js 版本 >= v${NODE_VERSION_MIN} ... "
@@ -1264,10 +1301,37 @@ init_database() {
   local db_password
   db_password=$(LC_ALL=C tr -dc 'A-Za-z0-9!@#%^&*' </dev/urandom 2>/dev/null | head -c 16 || echo "ExamPass$(date +%s)")
 
+  # 检查 MySQL root 密码
+  local root_password=""
+  
+  # 1. 尝试从环境变量读取
+  if [[ -n "${MYSQL_ROOT_PASSWORD:-}" ]]; then
+    root_password="$MYSQL_ROOT_PASSWORD"
+    log_info "使用环境变量 MYSQL_ROOT_PASSWORD"
+  # 2. 尝试从配置文件读取
+  elif [[ -f "$SCRIPT_DIR/.mysql_root_pass" ]]; then
+    root_password=$(cat "$SCRIPT_DIR/.mysql_root_pass")
+    log_info "使用配置文件中的 MySQL root 密码"
+  fi
+
+  # 如果没有 root 密码，尝试使用空密码连接测试
+  if [[ -z "$root_password" ]]; then
+    log_warn "未配置 MySQL root 密码，尝试使用空密码..."
+    if mysql -h localhost -u root -e "SELECT 1" &>/dev/null; then
+      root_password=""
+      log_ok "MySQL root 无需密码"
+    else
+      log_error "MySQL root 需要密码，请设置环境变量 MYSQL_ROOT_PASSWORD"
+      log_info "用法：export MYSQL_ROOT_PASSWORD='your_root_password'"
+      exit 1
+    fi
+  fi
+
   log_info "创建数据库和用户..."
 
-  # MySQL 初始化脚本
-  mysql -h localhost -u root <<MYSQL_SCRIPT
+  # MySQL 初始化脚本（支持密码）
+  if [[ -n "$root_password" ]]; then
+    mysql -h localhost -u root -p"${root_password}" <<MYSQL_SCRIPT
 -- 创建数据库
 CREATE DATABASE IF NOT EXISTS linux_exam CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
@@ -1279,9 +1343,24 @@ FLUSH PRIVILEGES;
 -- 验证
 SELECT 'Database created successfully' AS status;
 MYSQL_SCRIPT
+  else
+    mysql -h localhost -u root <<MYSQL_SCRIPT
+-- 创建数据库
+CREATE DATABASE IF NOT EXISTS linux_exam CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+-- 创建用户并授权
+CREATE USER IF NOT EXISTS 'exam_user'@'localhost' IDENTIFIED BY '${db_password}';
+GRANT ALL PRIVILEGES ON linux_exam.* TO 'exam_user'@'localhost';
+FLUSH PRIVILEGES;
+
+-- 验证
+SELECT 'Database created successfully' AS status;
+MYSQL_SCRIPT
+  fi
 
   if [[ $? -ne 0 ]]; then
     log_error "数据库初始化失败"
+    log_info "提示：请确认 MySQL root 密码正确 (export MYSQL_ROOT_PASSWORD='your_password')"
     exit 1
   fi
 
@@ -1295,7 +1374,10 @@ MYSQL_SCRIPT
   # 更新 .env 文件
   local env_file="$SCRIPT_DIR/.env"
   if [[ -f "$env_file" ]]; then
-    sed -i "s|^DATABASE_URL=.*|DATABASE_URL=mysql://exam_user:${db_password}@localhost:3306/linux_exam|" "$env_file"
+    # URL encode the password
+    local encoded_password
+    encoded_password=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${db_password}', safe=''))" 2>/dev/null || echo "${db_password}")
+    sed -i "s|^DATABASE_URL=.*|DATABASE_URL=mysql://exam_user:${encoded_password}@localhost:3306/linux_exam|" "$env_file"
   fi
 
   log_ok "数据库连接信息已写入 .env"
@@ -1512,6 +1594,16 @@ main() {
       ;;
      test-only)
       run_tests
+      ;;
+    test-score)
+      log_section "测试 score.sh 评分解析功能"
+      if [[ -f "$SCRIPT_DIR/test_score_parser.py" ]]; then
+        cd "$SCRIPT_DIR"
+        python3 test_score_parser.py
+      else
+        log_error "test_score_parser.py 不存在"
+        exit 1
+      fi
       ;;
     dev)
       dev_run
