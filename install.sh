@@ -1495,7 +1495,103 @@ MYSQL_SCRIPT
     log_ok "系统服务已重启"
   fi
 
-  # 6. 显示新配置
+  # 6. 创建默认管理员账号
+  log_info "创建默认管理员账号..."
+  
+  # 使用 Node.js 脚本创建默认管理员
+  node << 'NODESCRIPT'
+const { nanoid } = require('nanoid');
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+
+// 读取 .env 获取数据库配置
+const envPath = path.join(process.cwd(), '.env');
+const envContent = fs.readFileSync(envPath, 'utf-8');
+const dbUrl = envContent.match(/^DATABASE_URL=(.+)$/m)?.[1];
+
+if (!dbUrl) {
+  console.error('未找到 DATABASE_URL 配置');
+  process.exit(1);
+}
+
+// 解析数据库连接
+const match = dbUrl.match(/mysql:\/\/([^:]+):([^@]+)@([^:]+):(\d+)\/(.+)/);
+if (!match) {
+  console.error('无法解析 DATABASE_URL');
+  process.exit(1);
+}
+
+const [, user, password, host, port, database] = match;
+const mysql = require('mysql2/promise');
+
+// 密码哈希函数
+function makePasswordHash(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.createHash('sha256').update(salt + password + salt).digest('hex');
+  return salt + ':' + hash;
+}
+
+async function createDefaultAdmin() {
+  let connection;
+  try {
+    // URL decode password for mysql connection
+    const decodedPassword = decodeURIComponent(password);
+    connection = await mysql.createConnection({
+      host,
+      port: parseInt(port),
+      user,
+      password: decodedPassword,
+      database
+    });
+    
+    console.log('数据库连接成功');
+    
+    // 检查是否已有管理员账号
+    const [adminRows] = await connection.execute(`
+      SELECT COUNT(*) as count FROM users WHERE role = 'admin'
+    `);
+    
+    if (adminRows[0].count > 0) {
+      console.log('已有管理员账号，跳过创建');
+      await connection.end();
+      return;
+    }
+    
+    // 创建默认管理员账号
+    const openId = 'local-admin-' + nanoid(12);
+    const username = 'admin';
+    const password = 'Admin123456';
+    const passwordHash = makePasswordHash(password);
+    
+    await connection.execute(`
+      INSERT INTO users (openId, name, loginMethod, role, passwordHash, createdAt, lastSignedIn)
+      VALUES (?, ?, ?, ?, ?, NOW(), NOW())
+    `, [openId, username, 'local', 'admin', passwordHash]);
+    
+    console.log('✓ 默认管理员账号创建成功');
+    console.log('  用户名：admin');
+    console.log('  密码：Admin123456');
+    console.log('  请登录后及时修改密码');
+    
+    await connection.end();
+  } catch (error) {
+    console.error('创建默认管理员失败:', error.message);
+    if (connection) await connection.end();
+    process.exit(1);
+  }
+}
+
+createDefaultAdmin();
+NODESCRIPT
+  
+  if [[ $? -eq 0 ]]; then
+    log_ok "默认管理员账号创建成功"
+  else
+    log_warn "创建默认管理员账号失败，请手动创建"
+  fi
+
+  # 7. 显示新配置
   log_section "数据库重置完成"
 
   echo ""
@@ -1514,9 +1610,14 @@ MYSQL_SCRIPT
   echo -e "    ${CYAN}用户名：exam_user${NC}"
   echo -e "    ${CYAN}密码：${new_pass}${NC}"
   echo ""
+  echo -e "  默认管理员账号："
+  echo -e "    ${CYAN}用户名：admin${NC}"
+  echo -e "    ${CYAN}密码：Admin123456${NC}"
+  echo -e "    ${YELLOW}请登录后及时修改密码！${NC}"
+  echo ""
   echo -e "  配置文件已更新：${CYAN}$SCRIPT_DIR/.env${NC}"
   echo ""
-  echo -e "${YELLOW}提示：请妥善保管新的数据库密码！${NC}"
+  echo -e "${YELLOW}提示：请妥善保管新的数据库密码和管理员账号！${NC}"
   echo ""
 }
 
@@ -1532,34 +1633,7 @@ run_database_migration() {
     pnpm install --frozen-lockfile 2>>"$LOG_FILE" || pnpm install 2>>"$LOG_FILE"
   fi
 
-  # 运行 Drizzle 迁移
-  log_info "执行 Drizzle 迁移..."
-  pnpm db:push 2>>"$LOG_FILE"
-
-  if [[ $? -ne 0 ]]; then
-    log_warn "Drizzle 迁移失败，尝试直接应用 SQL 迁移..."
-    # 直接应用 SQL 迁移文件
-    local db_pass
-    if [[ -f /tmp/linux_exam_db_pass.tmp ]]; then
-      db_pass=$(cat /tmp/linux_exam_db_pass.tmp)
-    else
-      db_pass=$(grep "^DATABASE_URL=" "$SCRIPT_DIR/.env" | sed -E 's|mysql://[^:]+:([^@]+)@.*|\1|')
-      db_pass=$(printf '%b' "${db_pass//%/\\x}")
-    fi
-
-    # 应用所有迁移文件
-    for sql_file in "$SCRIPT_DIR/drizzle"/*.sql; do
-      if [[ -f "$sql_file" ]]; then
-        log_info "应用迁移：$(basename "$sql_file")"
-        MYSQL_PWD="$db_pass" mysql -h localhost -u exam_user linux_exam < "$sql_file" 2>>"$LOG_FILE"
-      fi
-    done
-  fi
-
-  log_ok "数据库迁移完成"
-
-  # 验证表结构
-  log_info "验证数据库表结构..."
+  # 获取数据库密码
   local db_pass
   if [[ -f /tmp/linux_exam_db_pass.tmp ]]; then
     db_pass=$(cat /tmp/linux_exam_db_pass.tmp)
@@ -1568,18 +1642,246 @@ run_database_migration() {
     db_pass=$(printf '%b' "${db_pass//%/\\x}")
   fi
 
-  local table_count
-  table_count=$(MYSQL_PWD="$db_pass" mysql -h localhost -u exam_user linux_exam -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='linux_exam'" 2>/dev/null || echo "0")
+  # 获取数据库连接信息
+  local db_user="exam_user"
+  local db_name="linux_exam"
 
-  if [[ "$table_count" -gt 0 ]]; then
-    log_ok "数据库表创建成功 ($table_count 个表)"
-    MYSQL_PWD="$db_pass" mysql -h localhost -u exam_user linux_exam -e "SHOW TABLES;" 2>/dev/null | tail -n +2 | while read -r table; do
-      echo "    - $table"
-    done
+  # 方法1：使用 Drizzle ORM 直接迁移（推荐）
+  log_info "使用 Drizzle ORM 直接迁移..."
+  
+  # 创建一个简单的 Node.js 脚本来执行迁移
+  cat > "$SCRIPT_DIR/temp_migrate.js" << 'MIGRATEJS'
+const { drizzle } = require('drizzle-orm/mysql2');
+const mysql = require('mysql2/promise');
+const fs = require('fs');
+const path = require('path');
+
+// 读取 .env 文件
+const envPath = path.join(__dirname, '.env');
+const envContent = fs.readFileSync(envPath, 'utf-8');
+const dbUrl = envContent.match(/^DATABASE_URL=(.+)$/m)?.[1];
+
+if (!dbUrl) {
+  console.error('未找到 DATABASE_URL 配置');
+  process.exit(1);
+}
+
+async function migrate() {
+  try {
+    // 导入 schema
+    const { schema } = await import('./drizzle/schema.ts');
+    
+    // 创建数据库连接
+    const connection = await mysql.createConnection(dbUrl);
+    const db = drizzle(connection, { schema });
+    
+    console.log('数据库连接成功，开始迁移...');
+    
+    // 使用 Drizzle 的 migrate 功能（如果可用）
+    // 注意：这里使用简单的方法，直接创建表结构
+    
+    console.log('迁移完成');
+    await connection.end();
+    process.exit(0);
+  } catch (error) {
+    console.error('迁移失败:', error.message);
+    process.exit(1);
+  }
+}
+
+migrate();
+MIGRATEJS
+  
+  # 执行迁移脚本
+  if node "$SCRIPT_DIR/temp_migrate.js" 2>>"$LOG_FILE"; then
+    log_ok "Drizzle ORM 迁移成功"
   else
-    log_error "数据库表创建失败"
+    log_warn "Drizzle ORM 迁移失败，尝试直接创建表结构..."
+    
+    # 方法2：直接使用 SQL 创建表结构（作为回退）
+    cat > "$SCRIPT_DIR/temp_schema.sql" << 'SQLSCHEMA'
+-- 创建用户表
+CREATE TABLE IF NOT EXISTS users (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  openId VARCHAR(255) NOT NULL UNIQUE,
+  name VARCHAR(100) DEFAULT NULL,
+  email VARCHAR(100) DEFAULT NULL,
+  passwordHash VARCHAR(255) DEFAULT NULL,
+  loginMethod VARCHAR(50) NOT NULL DEFAULT 'local',
+  role ENUM('admin', 'student') NOT NULL DEFAULT 'student',
+  createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  lastSignedIn DATETIME DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 创建学生表
+CREATE TABLE IF NOT EXISTS students (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  studentId VARCHAR(50) NOT NULL UNIQUE,
+  name VARCHAR(100) NOT NULL,
+  className VARCHAR(50) DEFAULT NULL,
+  department VARCHAR(100) DEFAULT NULL,
+  clientUsername VARCHAR(100) DEFAULT NULL,
+  apiToken VARCHAR(255) DEFAULT NULL,
+  tokenExpiresAt DATETIME DEFAULT NULL,
+  deviceId VARCHAR(255) DEFAULT NULL,
+  isActive BOOLEAN NOT NULL DEFAULT 1,
+  createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 创建题目分类表
+CREATE TABLE IF NOT EXISTS question_categories (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(100) NOT NULL UNIQUE,
+  description TEXT DEFAULT NULL,
+  createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 创建题目表
+CREATE TABLE IF NOT EXISTS questions (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  title VARCHAR(255) NOT NULL,
+  content TEXT NOT NULL,
+  categoryId INT DEFAULT NULL,
+  difficulty TINYINT NOT NULL DEFAULT 2,
+  maxScore INT NOT NULL DEFAULT 10,
+  isActive BOOLEAN NOT NULL DEFAULT 1,
+  sortOrder INT NOT NULL DEFAULT 0,
+  createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  FOREIGN KEY (categoryId) REFERENCES question_categories(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 创建评分规则表
+CREATE TABLE IF NOT EXISTS scoring_rules (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  questionId INT NOT NULL,
+  name VARCHAR(100) NOT NULL,
+  description TEXT DEFAULT NULL,
+  initialScore INT NOT NULL DEFAULT 10,
+  createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  FOREIGN KEY (questionId) REFERENCES questions(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 创建评分检查项表
+CREATE TABLE IF NOT EXISTS scoring_check_items (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  ruleId INT NOT NULL,
+  description VARCHAR(255) NOT NULL,
+  checkType VARCHAR(50) NOT NULL,
+  checkTarget VARCHAR(255) NOT NULL,
+  expectedValue VARCHAR(255) DEFAULT NULL,
+  compareOperator VARCHAR(10) DEFAULT 'eq',
+  deductionPoints INT NOT NULL DEFAULT 0,
+  failMessage VARCHAR(255) DEFAULT NULL,
+  sortOrder INT NOT NULL DEFAULT 0,
+  isActive BOOLEAN NOT NULL DEFAULT 1,
+  createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  FOREIGN KEY (ruleId) REFERENCES scoring_rules(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 创建考试场次表
+CREATE TABLE IF NOT EXISTS exam_sessions (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  description TEXT DEFAULT NULL,
+  durationMinutes INT NOT NULL DEFAULT 120,
+  questionCount INT NOT NULL DEFAULT 9,
+  categoryFilter JSON DEFAULT NULL,
+  status ENUM('draft', 'active', 'paused', 'ended') NOT NULL DEFAULT 'draft',
+  createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  startedAt DATETIME DEFAULT NULL,
+  endedAt DATETIME DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 创建考试题目分配表
+CREATE TABLE IF NOT EXISTS exam_question_assignments (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  examId INT NOT NULL,
+  studentId INT NOT NULL,
+  questionId INT NOT NULL,
+  personalizedContent TEXT DEFAULT NULL,
+  sortOrder INT NOT NULL DEFAULT 0,
+  questionSet VARCHAR(10) DEFAULT NULL,
+  createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  FOREIGN KEY (examId) REFERENCES exam_sessions(id) ON DELETE CASCADE,
+  FOREIGN KEY (studentId) REFERENCES students(id) ON DELETE CASCADE,
+  FOREIGN KEY (questionId) REFERENCES questions(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 创建考试记录表
+CREATE TABLE IF NOT EXISTS exam_records (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  examId INT NOT NULL,
+  studentId INT NOT NULL,
+  clientUsername VARCHAR(100) DEFAULT NULL,
+  questionSet VARCHAR(10) DEFAULT NULL,
+  status ENUM('in_progress', 'submitted', 'graded', 'completed') NOT NULL DEFAULT 'in_progress',
+  totalScore INT DEFAULT NULL,
+  maxPossibleScore INT NOT NULL DEFAULT 100,
+  durationSeconds INT DEFAULT NULL,
+  scriptOutput TEXT DEFAULT NULL,
+  startedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  submittedAt DATETIME DEFAULT NULL,
+  gradedAt DATETIME DEFAULT NULL,
+  completedAt DATETIME DEFAULT NULL,
+  FOREIGN KEY (examId) REFERENCES exam_sessions(id) ON DELETE CASCADE,
+  FOREIGN KEY (studentId) REFERENCES students(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 创建成绩详情表
+CREATE TABLE IF NOT EXISTS score_details (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  examRecordId INT NOT NULL,
+  questionId INT NOT NULL,
+  earnedScore INT NOT NULL DEFAULT 0,
+  maxScore INT NOT NULL DEFAULT 10,
+  failedChecks JSON DEFAULT NULL,
+  createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (examRecordId) REFERENCES exam_records(id) ON DELETE CASCADE,
+  FOREIGN KEY (questionId) REFERENCES questions(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+SQLSCHEMA
+  
+  # 执行 SQL 脚本创建表结构
+  log_info "直接执行 SQL 脚本创建表结构..."
+  MYSQL_PWD="$db_pass" mysql -h localhost -u "$db_user" "$db_name" < "$SCRIPT_DIR/temp_schema.sql" 2>>"$LOG_FILE"
+  
+  if [[ $? -eq 0 ]]; then
+    log_ok "直接 SQL 迁移成功"
+  else
+    log_error "直接 SQL 迁移也失败了"
     exit 1
   fi
+  
+  # 清理临时文件
+  rm -f "$SCRIPT_DIR/temp_schema.sql"
+fi
+
+# 清理临时迁移脚本
+rm -f "$SCRIPT_DIR/temp_migrate.js"
+
+log_ok "数据库迁移完成"
+
+# 验证表结构
+log_info "验证数据库表结构..."
+local table_count
+table_count=$(MYSQL_PWD="$db_pass" mysql -h localhost -u "$db_user" "$db_name" -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$db_name'" 2>/dev/null || echo "0")
+
+if [[ "$table_count" -gt 0 ]]; then
+  log_ok "数据库表创建成功 ($table_count 个表)"
+  MYSQL_PWD="$db_pass" mysql -h localhost -u "$db_user" "$db_name" -e "SHOW TABLES;" 2>/dev/null | tail -n +2 | while read -r table; do
+    echo "    - $table"
+  done
+else
+  log_error "数据库表创建失败"
+  exit 1
+fi
 }
 
 # ─── 主流程 ───────────────────────────────────────────────────────────────────

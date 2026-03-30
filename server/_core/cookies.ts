@@ -39,10 +39,16 @@ export function getSessionCookieOptions(
   //       ? hostname
   //       : undefined;
 
+  const secure = isSecureRequest(req);
+
+  // Browsers reject SameSite=None cookies unless Secure is also true.
+  // For local HTTP / standalone deployments, fall back to Lax.
+  const sameSite: NonNullable<CookieOptions["sameSite"]> = secure ? "none" : "lax";
+
   return {
     httpOnly: true,
     path: "/",
-    sameSite: "none",
-    secure: isSecureRequest(req),
+    sameSite,
+    secure,
   };
 }

@@ -3,10 +3,12 @@ import { ForbiddenError } from "@shared/_core/errors";
 import axios, { type AxiosInstance } from "axios";
 import { parse as parseCookieHeader } from "cookie";
 import type { Request } from "express";
-import { SignJWT, jwtVerify } from "jose";
 import type { User } from "../../drizzle/schema";
 import * as db from "../db";
 import { ENV } from "./env";
+
+// Use Node.js crypto module directly for JWT functionality
+import { createHmac, randomBytes } from 'crypto';
 import type {
   ExchangeTokenRequest,
   ExchangeTokenResponse,
@@ -155,7 +157,7 @@ class SDKServer {
 
   private getSessionSecret() {
     const secret = ENV.cookieSecret;
-    return new TextEncoder().encode(secret);
+    return secret;
   }
 
   /**
@@ -182,19 +184,36 @@ class SDKServer {
     payload: SessionPayload,
     options: { expiresInMs?: number } = {}
   ): Promise<string> {
-    const issuedAt = Date.now();
+    const issuedAt = Math.floor(Date.now() / 1000);
     const expiresInMs = options.expiresInMs ?? ONE_YEAR_MS;
-    const expirationSeconds = Math.floor((issuedAt + expiresInMs) / 1000);
+    const expiresAt = issuedAt + Math.floor(expiresInMs / 1000);
     const secretKey = this.getSessionSecret();
 
-    return new SignJWT({
-      openId: payload.openId,
-      appId: payload.appId,
-      name: payload.name,
-    })
-      .setProtectedHeader({ alg: "HS256", typ: "JWT" })
-      .setExpirationTime(expirationSeconds)
-      .sign(secretKey);
+    // Create JWT header
+    const header = {
+      alg: "HS256",
+      typ: "JWT"
+    };
+
+    // Create JWT payload
+    const jwtPayload = {
+      ...payload,
+      iat: issuedAt,
+      exp: expiresAt
+    };
+
+    // Encode header and payload
+    const encodedHeader = Buffer.from(JSON.stringify(header)).toString('base64url');
+    const encodedPayload = Buffer.from(JSON.stringify(jwtPayload)).toString('base64url');
+
+    // Create signature
+    const signatureInput = `${encodedHeader}.${encodedPayload}`;
+    const signature = createHmac('sha256', secretKey)
+      .update(signatureInput)
+      .digest('base64url');
+
+    // Combine all parts into JWT
+    return `${encodedHeader}.${encodedPayload}.${signature}`;
   }
 
   async verifySession(
@@ -207,10 +226,35 @@ class SDKServer {
 
     try {
       const secretKey = this.getSessionSecret();
-      const { payload } = await jwtVerify(cookieValue, secretKey, {
-        algorithms: ["HS256"],
-      });
-      const { openId, appId, name } = payload as Record<string, unknown>;
+      const parts = cookieValue.split('.');
+      
+      if (parts.length !== 3) {
+        console.warn("[Auth] Invalid session token format");
+        return null;
+      }
+
+      const [encodedHeader, encodedPayload, signature] = parts;
+
+      // Verify signature
+      const signatureInput = `${encodedHeader}.${encodedPayload}`;
+      const expectedSignature = createHmac('sha256', secretKey)
+        .update(signatureInput)
+        .digest('base64url');
+
+      if (signature !== expectedSignature) {
+        console.warn("[Auth] Invalid session token signature");
+        return null;
+      }
+
+      // Decode payload
+      const payload = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf-8'));
+      const { openId, appId, name, exp } = payload;
+
+      // Check expiration
+      if (exp && Math.floor(Date.now() / 1000) > exp) {
+        console.warn("[Auth] Session token expired");
+        return null;
+      }
 
       if (
         !isNonEmptyString(openId) ||
@@ -270,8 +314,15 @@ class SDKServer {
     const signedInAt = new Date();
     let user = await db.getUserByOpenId(sessionUserId);
 
-    // If user not in DB, sync from OAuth server automatically
+    // If user not in DB, check if it's a local user before trying OAuth sync
     if (!user) {
+      // For local users (openId starts with 'local-'), don't try OAuth sync
+      if (sessionUserId.startsWith('local-')) {
+        console.error("[Auth] Local user not found in database:", sessionUserId);
+        throw ForbiddenError("User not found");
+      }
+      
+      // Only try OAuth sync for non-local users
       try {
         const userInfo = await this.getUserInfoWithJwt(sessionCookie ?? "");
         await db.upsertUser({

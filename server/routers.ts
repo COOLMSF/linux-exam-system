@@ -18,6 +18,7 @@ import {
   deleteScoringRule,
   deleteStudent,
   drawRandomQuestions,
+  generateVariableContext,
   getAssignmentsForStudent,
   getDb,
   getExamRecord,
@@ -49,23 +50,11 @@ import {
   upsertUser,
 } from "./db";
 import { nanoid } from "nanoid";
-import { createHash, randomBytes } from "crypto";
 import { examQuestionAssignments } from "../drizzle/schema";
 import { getUserByName, setUserPassword, listAdminUsers } from "./db";
 
-// ─── Local auth helpers ───────────────────────────────────────────────────────
-function hashPassword(password: string, salt: string): string {
-  return createHash('sha256').update(salt + password + salt).digest('hex');
-}
-function makePasswordHash(password: string): string {
-  const salt = randomBytes(16).toString('hex');
-  return salt + ':' + hashPassword(password, salt);
-}
-function verifyPassword(password: string, stored: string): boolean {
-  const [salt, hash] = stored.split(':');
-  if (!salt || !hash) return false;
-  return hashPassword(password, salt) === hash;
-}
+// Import auth utilities from separate file to avoid crypto module issues in client build
+import { makePasswordHash, verifyPassword } from "./utils/auth";
 
 // ─── Admin guard ──────────────────────────────────────────────────────────────
 
@@ -291,15 +280,36 @@ const clientRouter = router({
       }
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      
+      // Generate random question set identifier (a, b, c, etc.)
+      const questionSet = 'a'; // For now, always use 'a' set, can be expanded to random selection
+      
+      // Create variable context for each question using the centralized function
+      const variableContexts = drawn.map((q, index) => {
+        return generateVariableContext(questionSet, index, student.clientUsername ?? "student");
+      });
+      
       await db.insert(examQuestionAssignments).values(
-        drawn.map((q, i) => ({
-          examId: input.examId,
-          studentId: student.id,
-          questionId: q.id,
-          personalizedContent: q.content.replace(/\{\{username\}\}/g, student.clientUsername ?? "student"),
-          sortOrder: i,
-        }))
+        drawn.map((q, i) => {
+          let personalizedContent = q.content;
+          const variables = variableContexts[i];
+          
+          // Replace all variables in the question content
+          Object.entries(variables).forEach(([placeholder, value]) => {
+            personalizedContent = personalizedContent.replace(new RegExp(placeholder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), value);
+          });
+          
+          return {
+            examId: input.examId,
+            studentId: student.id,
+            questionId: q.id,
+            personalizedContent: personalizedContent,
+            sortOrder: i,
+            questionSet: questionSet, // Store question set for later use
+          };
+        })
       );
+      
       // Create exam record
       const existing = await getExamRecord(input.examId, student.id);
       if (!existing) {
@@ -309,6 +319,7 @@ const clientRouter = router({
           clientUsername: student.clientUsername,
           status: "in_progress",
           maxPossibleScore: drawn.reduce((s, q) => s + q.maxScore, 0),
+          questionSet: questionSet, // Store question set for the exam
         });
       }
       assignments = await getAssignmentsForStudent(input.examId, student.id);
@@ -376,12 +387,40 @@ const clientRouter = router({
   fetchScoringScript: publicProcedure.input(z.object({
     token: z.string(),
     questionId: z.number(),
+    examId: z.number(),
   })).query(async ({ input }) => {
-    await validateToken(input.token);
-    const rule = await getScoringRuleByQuestion(input.questionId);
-    if (!rule) return null;
-    const items = await listCheckItemsByRule(rule.id);
-    return { script: generateShellScript(rule, items), ruleName: rule.name };
+    const student = await validateToken(input.token);
+    
+    // Get the question assignment to determine the question set
+    const assignments = await getAssignmentsForStudent(input.examId, student.id);
+    const assignment = assignments.find(a => a.questionId === input.questionId);
+    const questionSet = assignment?.questionSet || 'a';
+    
+    // Read the main score.sh script
+    const fs = require('fs');
+    const path = require('path');
+    const scoreScriptPath = path.join(__dirname, '../score.sh');
+    
+    if (!fs.existsSync(scoreScriptPath)) {
+      throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Score script not found" });
+    }
+    
+    let scriptContent = fs.readFileSync(scoreScriptPath, 'utf8');
+    
+    // Generate variable context for the script
+    const variables = generateVariableContext(questionSet, 0, student.clientUsername ?? "student");
+    
+    // Replace variables in the script content
+    Object.entries(variables).forEach(([placeholder, value]) => {
+      scriptContent = scriptContent.replace(new RegExp(placeholder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), value);
+    });
+    
+    return {
+      script: scriptContent,
+      ruleName: `score_${questionSet}`,
+      variables: variables,
+      username: student.clientUsername ?? "student",
+    };
   }),
 });
 

@@ -19,6 +19,7 @@ import {
   students,
   users,
 } from "../drizzle/schema";
+import { logger } from "./_core/logger";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -26,8 +27,9 @@ export async function getDb() {
   if (!_db && process.env.DATABASE_URL) {
     try {
       _db = drizzle(process.env.DATABASE_URL);
+      logger.info("Database connection established successfully");
     } catch (error) {
-      console.warn("[Database] Failed to connect:", error);
+      logger.error("Failed to connect to database", error, { url: process.env.DATABASE_URL?.replace(/:\/\/[^:]+:[^@]+@/, "://***:***@") });
       _db = null;
     }
   }
@@ -230,6 +232,38 @@ export async function drawRandomQuestions(count: number, categoryIds?: number[])
     .limit(count);
 }
 
+/**
+ * Generate variable context for a question based on the question set
+ * @param questionSet The question set identifier (e.g., 'a', 'b')
+ * @param questionIndex The index of the question in the exam
+ * @param studentUsername The student's username
+ * @returns Variable context object with placeholders and their values
+ */
+export function generateVariableContext(questionSet: string, questionIndex: number, studentUsername: string): Record<string, string> {
+  const context: Record<string, string> = {
+    '{{username}}': studentUsername,
+    ['{{' + questionSet + '}}']: questionSet + 'set', // Main set variable
+    ['{{' + questionSet + (questionIndex + 1) + '}}']: questionSet + 'set_q' + (questionIndex + 1), // Question-specific variable
+  };
+  
+  // Add additional variables based on question set
+  switch (questionSet) {
+    case 'a':
+      context['{{a_dbname}}'] = 'DAMENG';
+      context['{{a_instance}}'] = 'PROD';
+      context['{{a_port}}'] = '5236';
+      break;
+    case 'b':
+      context['{{b_dbname}}'] = 'DMEXAM';
+      context['{{b_instance}}'] = 'TEST';
+      context['{{b_port}}'] = '5237';
+      break;
+    // Add more cases for additional question sets as needed
+  }
+  
+  return context;
+}
+
 // ─── Scoring Rules ────────────────────────────────────────────────────────────
 
 export async function getScoringRuleByQuestion(questionId: number) {
@@ -332,6 +366,7 @@ export async function getAssignmentsForStudent(examId: number, studentId: number
     questionId: examQuestionAssignments.questionId,
     personalizedContent: examQuestionAssignments.personalizedContent,
     sortOrder: examQuestionAssignments.sortOrder,
+    questionSet: examQuestionAssignments.questionSet,
     title: questions.title,
     maxScore: questions.maxScore,
     difficulty: questions.difficulty,
@@ -387,6 +422,7 @@ export async function listExamRecords(examId?: number) {
     studentName: students.name,
     studentClass: students.className,
     clientUsername: examRecords.clientUsername,
+    questionSet: examRecords.questionSet,
     status: examRecords.status,
     totalScore: examRecords.totalScore,
     maxPossibleScore: examRecords.maxPossibleScore,

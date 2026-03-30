@@ -97,6 +97,7 @@ export const examQuestionAssignments = mysqlTable("exam_question_assignments", {
   questionId: bigint("questionId", { mode: "number", unsigned: true }).notNull(),
   personalizedContent: text("personalizedContent").notNull(),
   sortOrder: int("sortOrder").notNull().default(0),
+  questionSet: varchar("questionSet", { length: 10 }), // Added for question set identification
 });
 
 export const examRecords = mysqlTable("exam_records", {
@@ -104,6 +105,7 @@ export const examRecords = mysqlTable("exam_records", {
   examId: bigint("examId", { mode: "number", unsigned: true }).notNull(),
   studentId: bigint("studentId", { mode: "number", unsigned: true }).notNull(),
   clientUsername: varchar("clientUsername", { length: 100 }),
+  questionSet: varchar("questionSet", { length: 10 }), // Added for question set identification
   status: varchar("status", { length: 20 }).notNull().default("in_progress"),
   totalScore: int("totalScore"),
   maxPossibleScore: int("maxPossibleScore"),
