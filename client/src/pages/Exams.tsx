@@ -82,6 +82,7 @@ export default function Exams() {
                       <div className="min-w-0">
                         <p className="font-semibold text-sm truncate">{exam.name}</p>
                         <div className="flex items-center gap-3 mt-1.5 text-xs text-muted-foreground">
+                          <span className="font-mono text-muted-foreground/70">ID: {exam.id}</span>
                           <span className="flex items-center gap-1"><Clock className="h-3 w-3" />{exam.durationMinutes}分钟</span>
                           <span className="flex items-center gap-1"><BookOpen className="h-3 w-3" />{exam.questionCount}题</span>
                         </div>

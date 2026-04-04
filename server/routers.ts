@@ -55,6 +55,11 @@ import { getUserByName, setUserPassword, listAdminUsers } from "./db";
 
 // Import auth utilities from separate file to avoid crypto module issues in client build
 import { makePasswordHash, verifyPassword } from "./utils/auth";
+import { readFileSync, existsSync } from "fs";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 // ─── Admin guard ──────────────────────────────────────────────────────────────
 
@@ -233,14 +238,12 @@ const examsRouter = router({
 // ─── Client API Router (used by Python Agent) ─────────────────────────────────
 
 function buildScoringScript(questionSet: string, username: string): string {
-  const fs = require("fs");
-  const path = require("path");
   const candidateScriptPaths = [
-    path.join(__dirname, `../score_${questionSet}.sh`),
-    path.join(__dirname, `../score-${questionSet}.sh`),
-    path.join(__dirname, "../score.sh"),
+    join(__dirname, `../score_${questionSet}.sh`),
+    join(__dirname, `../score-${questionSet}.sh`),
+    join(__dirname, "../score.sh"),
   ];
-  const scoreScriptPath = candidateScriptPaths.find((p: string) => fs.existsSync(p));
+  const scoreScriptPath = candidateScriptPaths.find((p: string) => existsSync(p));
 
   if (!scoreScriptPath) {
     throw new TRPCError({
@@ -249,7 +252,7 @@ function buildScoringScript(questionSet: string, username: string): string {
     });
   }
 
-  let scriptContent = fs.readFileSync(scoreScriptPath, "utf8");
+  let scriptContent = readFileSync(scoreScriptPath, "utf8");
 
   const variables = generateVariableContext(questionSet, 0, username);
 

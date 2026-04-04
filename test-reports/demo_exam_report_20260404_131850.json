@@ -1,0 +1,13 @@
+{
+  "timestamp": "2026-04-04T13:18:50.567743",
+  "server": "http://localhost:3000",
+  "examId": 6,
+  "recordId": 6,
+  "questionCount": 2,
+  "score": {
+    "total": 0,
+    "max": 20
+  },
+  "questionSet": "b",
+  "status": "success"
+}

@@ -435,7 +435,7 @@ class ScriptExecutor:
 class ExamController:
     """控制完整考试流程"""
 
-    def __init__(self, server_url: str, auto_mode: bool = True, exam_id: int = 1):
+    def __init__(self, server_url: str, auto_mode: bool = True, exam_id: int = 1, student_id: str = ""):
         self.api = ExamAPIClient(server_url)
         self.executor = ScriptExecutor()
         self.sys_info = get_system_info()
@@ -443,6 +443,7 @@ class ExamController:
         self.client_started_at = datetime.now().isoformat()
         self.auto_mode = auto_mode  # 自动模式：无需确认直接评分
         self.exam_id = exam_id  # 考试 ID
+        self.student_id = student_id  # 学生 ID（学号）
 
     def print_banner(self):
         """打印系统横幅"""
@@ -456,10 +457,12 @@ class ExamController:
 """
         print(banner)
 
-    def authenticate(self) -> bool:
-        """执行身份认证流程"""
+    def authenticate(self, force: bool = False) -> bool:
+        """执行身份认证流程；force=True 跳过缓存强制重新向服务端认证"""
         username = self.sys_info["username"]
         device_id = self.sys_info["device_id"]
+        # studentId 优先读配置，否则用系统用户名
+        student_id = self.student_id or username
 
         print(f"\n[系统信息]")
         print(f"  当前用户：{username}")
@@ -467,25 +470,33 @@ class ExamController:
         print(f"  操作系统：{self.sys_info['os']} {self.sys_info['os_version']}")
         print(f"  设备 ID:  {device_id[:16]}...")
 
-        cached_token = load_token()
-        if cached_token:
-            self.api.token = cached_token
-            self.api.session = create_session(self.api.server_url, cached_token)
-            logger.info("使用本地缓存 Token")
-            return True
+        if not force:
+            cached_token = load_token()
+            if cached_token:
+                self.api.token = cached_token
+                self.api.session = create_session(self.api.server_url, cached_token)
+                logger.info("使用本地缓存 Token")
+                return True
+
+        # 强制重认证：先清除本地缓存
+        if TOKEN_FILE.exists():
+            TOKEN_FILE.unlink()
 
         print(f"\n[认证] 正在向服务端认证 ({self.api.server_url})...")
+        print(f"  学生 ID：{student_id}")
         try:
-            result = self.api.authenticate(username, device_id, username)
-            if result.get("json", result).get("token"):
-                print(f"[认证] 认证成功！欢迎，{result.get('json', result).get('name', username)}")
+            result = self.api.authenticate(student_id, device_id, username)
+            resp = result.get("json", result)
+            if resp.get("token"):
+                print(f"[认证] 认证成功！欢迎，{resp.get('name', student_id)}")
                 return True
             else:
                 print(f"[认证] 认证失败：{result.get('message', '未知错误')}")
                 return False
         except AuthenticationError as e:
             print(f"[认证] 认证失败：{e}")
-            print("[提示] 请联系监考老师确认您的账号已在系统中注册")
+            print(f"[提示] 学生 ID '{student_id}' 未在系统中注册，请联系监考老师")
+            print(f"[提示] 或使用 --student-id <你的学号> 指定正确的学生 ID")
             return False
         except NetworkError as e:
             print(f"[网络] 连接失败：{e}")
@@ -514,13 +525,14 @@ class ExamController:
                     method="POST"
                 )
                 
-                if result and result.get("questions"):
+                data = result.get("json", result) if isinstance(result, dict) else result
+                if data and data.get("questions"):
                     # 认证成功，返回考试信息
                     exam = {
                         "id": self.exam_id,
-                        "name": result.get("examName", f"考试 #{self.exam_id}"),
-                        "durationMinutes": result.get("durationMinutes", 120),
-                        "questionCount": len(result.get("questions", [])),
+                        "name": data.get("examName", f"考试 #{self.exam_id}"),
+                        "durationMinutes": data.get("durationMinutes", 120),
+                        "questionCount": len(data.get("questions", [])),
                     }
                     print(f"\n[考试] 发现考试：{exam.get('name', '未命名考试')}")
                     print(f"       时长：{exam.get('durationMinutes', 0)} 分钟")
@@ -528,9 +540,9 @@ class ExamController:
                     return exam
                     
             except AuthenticationError:
-                # Token 过期，尝试重新认证
+                # Token 过期，强制清除缓存重新认证
                 print("\n[认证] Token 已过期，正在重新认证...")
-                if not self.authenticate():
+                if not self.authenticate(force=True):
                     return None
             except APIError as e:
                 # 考试未开始或不存在
@@ -637,7 +649,8 @@ class ExamController:
         # Step 3: 获取题目
         print("\n[抽题] 正在从服务端获取题目...")
         try:
-            questions_data = self.api.fetch_questions(exam["id"])
+            questions_raw = self.api.fetch_questions(exam["id"])
+            questions_data = questions_raw.get("json", questions_raw) if isinstance(questions_raw, dict) else questions_raw
             questions = questions_data.get("questions", [])
         except Exception as e:
             print(f"[错误] 获取题目失败：{e}")
@@ -649,11 +662,12 @@ class ExamController:
 
         # Step 4: 开始考试记录
         try:
-            record = self.api._call(
+            record_raw = self.api._call(
                 "agentApi.startExam",
                 {"token": self.api.token, "examId": exam["id"]},
                 method="POST",
             )
+            record = record_raw.get("json", record_raw) if isinstance(record_raw, dict) else record_raw
             record_id = record.get("recordId")
             # Exam start time: when client confirms the exam start.
             self.start_time = time.time()
@@ -801,6 +815,7 @@ def main():
     parser.add_argument("--auto", "-a", action="store_true", help="自动评分模式（默认，可省略）")
     parser.add_argument("--manual", "-m", action="store_true", help="手动评分模式（需按 Enter 确认）")
     parser.add_argument("--exam-id", "-e", type=int, default=1, help="考试 ID (默认：1)")
+    parser.add_argument("--student-id", "-i", type=str, default="", help="学生 ID / 学号 (默认：系统用户名)")
     parser.add_argument("--version", "-v", action="version", version="ExamAgent 1.2")
     args = parser.parse_args()
 
@@ -836,7 +851,8 @@ def main():
     auto_mode = not args.manual
     if args.auto:
         auto_mode = True
-    controller = ExamController(server_url, auto_mode=auto_mode, exam_id=args.exam_id)
+    student_id = getattr(args, 'student_id', '') or config.get('student_id', '')
+    controller = ExamController(server_url, auto_mode=auto_mode, exam_id=args.exam_id, student_id=student_id)
     return controller.run()
 
 

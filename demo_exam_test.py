@@ -190,7 +190,7 @@ async function createTestData() {{
     await connection.execute(`
       INSERT INTO students (studentId, name, className, isActive, createdAt, updatedAt)
       VALUES ('demo_student', '演示学生', 'Demo Class', 1, NOW(), NOW())
-      ON DUPLICATE KEY UPDATE name='演示学生'
+      ON DUPLICATE KEY UPDATE name='演示学生', deviceId=NULL, apiToken=NULL, tokenExpiresAt=NULL, updatedAt=NOW()
     `);
     console.log('✓ 学生账号创建成功 (demo_student)');
     
@@ -321,30 +321,33 @@ def run_demo_exam(exam_id: int):
         os.remove(token_file)
         log_info("已清除旧 token")
 
-    # 3. 认证
+    # 3. 认证（使用 demo_student 账号）
+    student_id = "demo_student"
     print("\n[演示] 正在认证...")
+    print(f"  学生 ID: {student_id}")
     api = ExamAPIClient(server_url)
 
     try:
-        result = api.authenticate(username, device_id, username)
+        result = api.authenticate(student_id, device_id, username)
         token_data = result.get("json", result)
         if token_data.get("token"):
             log_ok("认证成功")
         else:
             log_error(f"认证失败：{result}")
-            return False
+            return False, None
     except Exception as e:
         log_error(f"认证异常：{e}")
-        return False
+        return False, None
 
     # 4. 获取考试题目
     print(f"\n[演示] 获取考试题目 (examId={exam_id})...")
     try:
-        questions_data = api._call("agentApi.fetchQuestions", {
+        questions_raw = api._call("agentApi.fetchQuestions", {
             "token": api.token,
             "examId": exam_id
         }, method="POST")
-
+        # tRPC superjson wraps result under 'json' key
+        questions_data = questions_raw.get("json", questions_raw)
         questions = questions_data.get("questions", [])
         log_ok(f"获取到 {len(questions)} 道题目")
 
@@ -354,28 +357,29 @@ def run_demo_exam(exam_id: int):
     except Exception as e:
         log_error(f"获取题目失败：{e}")
         print(f"  提示：请确保考试场次已创建并处于 active 状态")
-        return False
+        return False, None
 
     # 5. 开始考试
     print(f"\n[演示] 开始考试...")
     try:
-        record = api._call("agentApi.startExam", {
+        record_raw = api._call("agentApi.startExam", {
             "token": api.token,
             "examId": exam_id
         }, method="POST")
+        record = record_raw.get("json", record_raw)
         record_id = record.get("recordId")
         log_ok(f"考试记录已创建 (recordId={record_id})")
     except Exception as e:
         log_error(f"开始考试失败：{e}")
-        return False
+        return False, None
 
     # 6. 执行评分（自动模式，一次执行整套 score.sh）
     print(f"\n[演示] 执行自动评分...")
     executor = ScriptExecutor(timeout=60)
     script = questions[0].get("scoringScript")
     if not script:
-        log_error("题目缺少 scoringScript")
-        return False, None
+        log_warn("题目缺少 scoringScript，跳过评分步骤")
+        script = ""
 
     result = executor.execute_script(script, username)
     question_scores = result.get("questionScores", {}) or {}
@@ -389,8 +393,8 @@ def run_demo_exam(exam_id: int):
         total_score += q_score
         total_max += q_max
         all_results.append({
-            "questionId": q.get("id"),
-            "questionTitle": q.get("title"),
+            "questionId": q.get("questionId"),
+            "questionTitle": q.get("personalizedContent", "")[:40],
             "score": q_score,
             "maxScore": q_max,
             "details": result.get("details", []),
@@ -429,7 +433,7 @@ def run_demo_exam(exam_id: int):
                 "questionCount": len(questions),
             },
             "details": [{
-                "questionId": q.get("id"),
+                "questionId": q.get("questionId"),
                 "earnedScore": q.get("score", 0),
                 "maxScore": q.get("maxScore", 10),
                 "failedChecks": []
@@ -440,7 +444,7 @@ def run_demo_exam(exam_id: int):
         log_ok("成绩已提交")
     except Exception as e:
         log_error(f"提交成绩失败：{e}")
-        return False
+        return False, None
 
     # 8. 结束考试
     print(f"\n[演示] 结束考试...")

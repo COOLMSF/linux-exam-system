@@ -135,7 +135,7 @@ check_root() {
 
 # ─── 打包：客户端 Agent（单文件可执行）──────────────────────────────────────────
 package_client() {
-  log_section "打包客户端 Agent（生成单文件可执行）"
+  log_section "打包客户端 Agent（Ubuntu / 麒麟 单文件可执行）"
 
   local agent_dir="$SCRIPT_DIR/client_agent"
   if [[ ! -f "$agent_dir/exam_agent.py" ]]; then
@@ -143,64 +143,48 @@ package_client() {
     exit 1
   fi
 
-  local out_dir="$SCRIPT_DIR/dist/client_agent"
-  mkdir -p "$out_dir"
-
-  # 优先使用 manylinux2014 容器构建，获得更老 glibc 兼容性（Ubuntu / 麒麟更稳）
-  if command -v docker &>/dev/null; then
-    log_info "检测到 Docker，使用 manylinux2014 容器进行兼容构建（推荐）..."
-    rm -rf "$agent_dir/build" "$agent_dir/dist" "$agent_dir/__pycache__" 2>/dev/null || true
-
-    docker run --rm \
-      -v "$SCRIPT_DIR:/work" \
-      -w /work/client_agent \
-      quay.io/pypa/manylinux2014_x86_64 \
-      bash -lc "
-        set -euo pipefail
-        PY=/opt/python/cp311-cp311/bin/python
-        \$PY -m pip install -U pip wheel setuptools >/dev/null
-        \$PY -m pip install -r requirements.txt >/dev/null
-        \$PY -m PyInstaller exam_agent.spec --noconfirm --clean
-      " 2>>"$LOG_FILE" || {
-        log_warn "manylinux 构建失败，回退到本机构建（可能兼容性略差）"
-      }
-
-    if [[ -f "$agent_dir/dist/exam_agent" ]]; then
-      cp -f "$agent_dir/dist/exam_agent" "$out_dir/exam_agent-linux-x86_64" || true
-      chmod +x "$out_dir/exam_agent-linux-x86_64" || true
-      log_ok "已生成: $out_dir/exam_agent-linux-x86_64"
-      log_info "运行示例: $out_dir/exam_agent-linux-x86_64 --help"
-      return 0
-    fi
-  fi
-
-  # 回退：本机构建（仍然是单文件可执行，但依赖本机 glibc 版本）
-  log_info "使用本机 Python + PyInstaller 构建..."
+  # 检查 Python3
   if ! command -v python3 &>/dev/null; then
-    log_error "未找到 python3，无法打包。请先安装 Python 3"
+    log_error "未找到 python3，请先安装：sudo apt install python3 python3-pip python3-venv"
     exit 1
   fi
+  log_ok "Python $(python3 --version)"
 
+  # 创建独立虚拟环境，避免污染系统包
   local venv_dir="$SCRIPT_DIR/.packaging/venv"
-  mkdir -p "$SCRIPT_DIR/.packaging"
-  python3 -m venv "$venv_dir" 2>>"$LOG_FILE"
+  log_info "创建虚拟环境: $venv_dir"
+  python3 -m venv "$venv_dir"
   # shellcheck disable=SC1091
   source "$venv_dir/bin/activate"
-  pip install -U pip wheel setuptools >/dev/null 2>>"$LOG_FILE"
-  pip install -r "$agent_dir/requirements.txt" >/dev/null 2>>"$LOG_FILE"
 
-  rm -rf "$agent_dir/build" "$agent_dir/dist" 2>/dev/null || true
-  (cd "$agent_dir" && pyinstaller exam_agent.spec --noconfirm --clean) 2>>"$LOG_FILE"
+  log_info "安装依赖..."
+  pip install -q -U pip setuptools wheel
+  pip install -q -r "$agent_dir/requirements.txt"
 
-  if [[ -f "$agent_dir/dist/exam_agent" ]]; then
-    cp -f "$agent_dir/dist/exam_agent" "$out_dir/exam_agent-linux-x86_64" || true
-    chmod +x "$out_dir/exam_agent-linux-x86_64" || true
-    log_ok "已生成: $out_dir/exam_agent-linux-x86_64"
-    log_info "运行示例: $out_dir/exam_agent-linux-x86_64 --help"
-  else
-    log_error "打包失败：未生成 $agent_dir/dist/exam_agent（详见日志：$LOG_FILE）"
+  # 清理旧产物
+  rm -rf "$agent_dir/build" "$agent_dir/dist"
+
+  log_info "PyInstaller 打包中..."
+  cd "$agent_dir"
+  pyinstaller exam_agent.spec --noconfirm --clean
+
+  deactivate
+
+  local binary="$agent_dir/dist/exam_agent"
+  if [[ ! -f "$binary" ]]; then
+    log_error "打包失败，未找到 $binary"
     exit 1
   fi
+
+  # 拷贝到输出目录
+  local out_dir="$SCRIPT_DIR/dist/client_agent"
+  mkdir -p "$out_dir"
+  cp -f "$binary" "$out_dir/exam_agent"
+  chmod +x "$out_dir/exam_agent"
+
+  log_ok "打包成功！"
+  log_ok "输出路径: $out_dir/exam_agent"
+  log_info "运行示例: $out_dir/exam_agent --help"
 }
 
 # ─── 打包：服务端（占位，后续可扩展）────────────────────────────────────────────
