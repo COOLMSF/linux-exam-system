@@ -30,7 +30,10 @@ export default function Exams() {
   const [selectedExam, setSelectedExam] = useState<number | null>(null);
   const [form, setForm] = useState({ name: "", description: "", durationMinutes: "120", questionCount: "9" });
 
-  const { data: records } = trpc.exams.records.useQuery({ examId: selectedExam ?? undefined }, { enabled: selectedExam !== null });
+  const { data: records } = trpc.exams.records.useQuery(
+    { examId: selectedExam ?? undefined },
+    { enabled: selectedExam !== null, refetchInterval: 5000 },
+  );
   const { data: stats } = trpc.exams.stats.useQuery({ examId: selectedExam! }, { enabled: selectedExam !== null });
 
   function handleCreate() {
@@ -167,7 +170,7 @@ export default function Exams() {
                       <table className="w-full">
                         <thead>
                           <tr className="border-b bg-muted/30">
-                            {["学生", "用户名", "得分", "用时", "状态", "提交时间"].map(h => (
+                            {["学生", "用户名", "得分", "用时", "状态", "开始/结束"].map(h => (
                               <th key={h} className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground">{h}</th>
                             ))}
                           </tr>
@@ -194,14 +197,25 @@ export default function Exams() {
                               <td className="px-4 py-3">
                                 <Badge variant="outline" className={
                                   r.status === "graded" ? "badge-active border-emerald-200" :
+                                  r.status === "completed" ? "badge-ended border-red-200" :
                                   r.status === "submitted" ? "badge-paused border-amber-200" :
                                   "badge-draft border-slate-200"
                                 }>
-                                  {r.status === "graded" ? "已评分" : r.status === "submitted" ? "待评分" : "进行中"}
+                                  {r.status === "graded"
+                                    ? "已评分"
+                                    : r.status === "completed"
+                                      ? "已结束"
+                                      : r.status === "submitted"
+                                        ? "待评分"
+                                        : "进行中"}
                                 </Badge>
                               </td>
                               <td className="px-4 py-3 text-xs text-muted-foreground">
-                                {r.submittedAt ? new Date(r.submittedAt).toLocaleString("zh-CN") : "—"}
+                                {r.startedAt ? new Date(r.startedAt).toLocaleString("zh-CN") : "—"}
+                                {" / "}
+                                {r.completedAt
+                                  ? new Date(r.completedAt).toLocaleString("zh-CN")
+                                  : (r.submittedAt ? new Date(r.submittedAt).toLocaleString("zh-CN") : "—")}
                               </td>
                             </tr>
                           ))}

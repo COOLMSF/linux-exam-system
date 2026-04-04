@@ -1,21 +1,12 @@
 #!/bin/bash
-# Usage: score.sh <username>
-
-# Check if username is provided
-if [ -z "$1" ]; then
-    echo "Error: Username not provided"
-    echo "Usage: $0 <username>"
-    exit 1
-fi
-
-# Set username variable
-USERNAME="$1"
+# Username is injected by the server (see `{{username}}` placeholder).
+USERNAME="{{username}}"
 echo "Scoring for user: $USERNAME"
 
 # Initialize variables
 rm -f /home/dmdba/*.buf
 DMPATH=/dm/bin
-conn_s=sysdba/Dameng123@localhost:5236
+conn_s=sysdba/Dameng123@localhost:{{port_expected}}
 total=100
 a1=4
 a2=14
@@ -50,7 +41,7 @@ $DMPATH/disql -s $conn_s -f /var/local/sc/rw_instance.sql >/dev/null 2>>$LOG_FIL
 $DMPATH/disql -s $conn_s -f /var/local/sc/rw_portnum.sql >/dev/null 2>>$LOG_FILE
 
 DBNAME=`head -1 /home/dmdba/a.buf|tr -s "  " |cut -d " " -f 2`
-if [ $DBNAME = "DAMENG" ]; then
+if [ $DBNAME = "{{db_expected}}" ]; then
     echo "" | tee -a $LOG_FILE
 else
     echo "数据库名:-1" | tee -a $LOG_FILE
@@ -58,7 +49,7 @@ else
 fi
 
 INS_NAME=`head -1 /home/dmdba/b.buf|tr -s "  " |cut -d " " -f 2`
-if [ $INS_NAME = "PROD" ]; then
+if [ $INS_NAME = "{{instance_expected}}" ]; then
     echo "" | tee -a $LOG_FILE
 else
     echo "实例名:-1" | tee -a $LOG_FILE
@@ -66,7 +57,7 @@ else
 fi
 
 PORT_NUM=`head -1 /home/dmdba/c.buf|tr -s "  " |cut -d " " -f 2`
-if [ $PORT_NUM == 5236 ]; then
+if [ $PORT_NUM == {{port_expected}} ]; then
     echo "" | tee -a $LOG_FILE
 else
     echo "端口号:-1" | tee -a $LOG_FILE
@@ -124,7 +115,7 @@ fi
 
 $DMPATH/disql -s $conn_s -f /var/local/sc/rw_usertest.sql >/dev/null 2>>$LOG_FILE
 USERTEST=`head -1 /home/dmdba/k.buf|tr -s "  " |cut -d " " -f 2`
-if [ $USERTEST = "DMEXAM" ]; then
+if [ $USERTEST = "{{user_expected}}" ]; then
     echo "" | tee -a $LOG_FILE
 else
     echo "账户不存在:-1" | tee -a $LOG_FILE
@@ -243,7 +234,7 @@ fi
 $DMPATH/disql -s $conn_s -f /var/local/sc/rw_trigg1.sql >/dev/null 2>>$LOG_FILE
 OWNER1=`head -1 /home/dmdba/trigg1.buf|tr -s "  " |cut -d " " -f 2`
 NAME1=`head -1 /home/dmdba/trigg1.buf|tr -s "  " |cut -d " " -f 3`
-if [ $OWNER1 = "DMEXAM" ] && [ $NAME1 = "TR_EVENTLOG" ]; then
+if [ $OWNER1 = "{{user_expected}}" ] && [ $NAME1 = "TR_EVENTLOG" ]; then
     echo "" | tee -a $LOG_FILE
 else
     echo "触发器创建失败:-8" | tee -a $LOG_FILE

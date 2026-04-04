@@ -1,5 +1,10 @@
-Sign in to continue
+自动出题功能我们老师跟我说了一个思路我不知道你能不能实现，就是他说设置一个变量，抽到a套题就代入到,a变量里然后对应的评分脚本,也是a变量里的,可以替换一些题目里的名字什么的,你需要根据这个思路编写自动出题和自动评分程序，学生运行客户端即刻代表考试开始，你需要记录时间以及客户端完成考试后进行自动评分，服务端可以实时看到考试开始结束情况，考试完毕客户端评分收集考试信息到服务端
 
-Access to this dashboard requires authentication. Continue to launch the login flow.
 
-我已经登陆了 为什么还需要登录
+https://vagcwtlhi0m.feishu.cn/wiki/Z9gxwgCk1ivSEUkwnVackXUrnUc
+
+E0C1E34E-F032-4A43-9EC3-83099FCD85C3
+
+完成一键测试，并输出测试报告，要求web页面服务端客户端能正常工作无bug
+
+编写一键重置mysql密码，写入install.sh脚本并自动更新.env的mysql登录信息

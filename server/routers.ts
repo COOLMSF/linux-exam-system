@@ -232,6 +232,37 @@ const examsRouter = router({
 
 // ─── Client API Router (used by Python Agent) ─────────────────────────────────
 
+function buildScoringScript(questionSet: string, username: string): string {
+  const fs = require("fs");
+  const path = require("path");
+  const candidateScriptPaths = [
+    path.join(__dirname, `../score_${questionSet}.sh`),
+    path.join(__dirname, `../score-${questionSet}.sh`),
+    path.join(__dirname, "../score.sh"),
+  ];
+  const scoreScriptPath = candidateScriptPaths.find((p: string) => fs.existsSync(p));
+
+  if (!scoreScriptPath) {
+    throw new TRPCError({
+      code: "INTERNAL_SERVER_ERROR",
+      message: "Score script not found",
+    });
+  }
+
+  let scriptContent = fs.readFileSync(scoreScriptPath, "utf8");
+
+  const variables = generateVariableContext(questionSet, 0, username);
+
+  Object.entries(variables).forEach(([placeholder, value]) => {
+    scriptContent = scriptContent.replace(
+      new RegExp(placeholder.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"),
+      value,
+    );
+  });
+
+  return scriptContent;
+}
+
 const clientRouter = router({
   /** Step 1: Agent authenticates with studentId + deviceId, receives token */
   authenticate: publicProcedure.input(z.object({
@@ -258,6 +289,35 @@ const clientRouter = router({
     return { token, expiresAt, studentId: student.id, name: student.name };
   }),
 
+  /** Step 1.5: Agent starts the exam (records start time/status) */
+  startExam: publicProcedure.input(
+    z.object({
+      token: z.string(),
+      examId: z.number(),
+    }),
+  ).mutation(async ({ input }) => {
+    const student = await validateToken(input.token);
+    const exam = await getExamSessionById(input.examId);
+    if (!exam || exam.status !== "active") {
+      throw new TRPCError({ code: "NOT_FOUND", message: "Exam not active" });
+    }
+
+    const record = await getExamRecord(input.examId, student.id);
+    if (!record) {
+      throw new TRPCError({
+        code: "NOT_FOUND",
+        message: "Exam record not found (call fetchQuestions first)",
+      });
+    }
+
+    await updateExamRecord(record.id, {
+      status: "in_progress",
+      startedAt: new Date(),
+    });
+
+    return { success: true, recordId: record.id, questionSet: record.questionSet };
+  }),
+
   /** Step 2: Agent fetches personalised questions for an active exam */
   fetchQuestions: publicProcedure.input(z.object({
     token: z.string(),
@@ -281,8 +341,8 @@ const clientRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       
-      // Generate random question set identifier (a, b, c, etc.)
-      const questionSet = 'a'; // For now, always use 'a' set, can be expanded to random selection
+      // Generate random question set identifier (a/b)
+      const questionSet = Math.random() < 0.5 ? 'a' : 'b';
       
       // Create variable context for each question using the centralized function
       const variableContexts = drawn.map((q, index) => {
@@ -310,7 +370,7 @@ const clientRouter = router({
         })
       );
       
-      // Create exam record
+      // Create exam record (created on first fetch, startedAt is finalized in startExam)
       const existing = await getExamRecord(input.examId, student.id);
       if (!existing) {
         await createExamRecord({
@@ -325,10 +385,19 @@ const clientRouter = router({
       assignments = await getAssignmentsForStudent(input.examId, student.id);
     }
 
+    const questionSetUsed = assignments[0]?.questionSet ?? "a";
+    const scoringScript = buildScoringScript(
+      questionSetUsed,
+      student.clientUsername ?? "student",
+    );
+
     return {
       examName: exam.name,
       durationMinutes: exam.durationMinutes,
-      questions: assignments,
+      questions: assignments.map(a => ({
+        ...a,
+        scoringScript,
+      })),
     };
   }),
 
@@ -339,6 +408,19 @@ const clientRouter = router({
     totalScore: z.number(),
     durationSeconds: z.number(),
     scriptOutput: z.string().optional(),
+    examMeta: z.object({
+      examStartedAt: z.string().optional(),
+      examCompletedAt: z.string().optional(),
+      clientStartedAt: z.string().optional(),
+      hostname: z.string().optional(),
+      os: z.string().optional(),
+      osVersion: z.string().optional(),
+      arch: z.string().optional(),
+      deviceId: z.string().optional(),
+      username: z.string().optional(),
+      questionSet: z.string().optional(),
+      questionCount: z.number().optional(),
+    }).optional(),
     details: z.array(z.object({
       questionId: z.number(),
       earnedScore: z.number(),
@@ -355,11 +437,19 @@ const clientRouter = router({
       return { success: true, message: "Already graded" };
     }
     const now = new Date();
+    let finalScriptOutput = input.scriptOutput;
+    if (input.examMeta) {
+      finalScriptOutput = JSON.stringify({
+        examMeta: input.examMeta,
+        raw: input.scriptOutput ?? "",
+      }, null, 2);
+    }
+
     await updateExamRecord(record.id, {
       status: "graded",
       totalScore: input.totalScore,
       durationSeconds: input.durationSeconds,
-      scriptOutput: input.scriptOutput,
+      scriptOutput: finalScriptOutput,
       submittedAt: now,
       gradedAt: now,
     });
@@ -369,15 +459,24 @@ const clientRouter = router({
 
   /** Step 4: Agent finishes exam and updates record status */
   finishExam: publicProcedure.input(z.object({
+    token: z.string(),
     recordId: z.number(),
   })).mutation(async ({ input }) => {
+    const student = await validateToken(input.token);
     const record = await getExamRecordById(input.recordId);
     if (!record) {
       throw new TRPCError({ code: "NOT_FOUND", message: "Exam record not found" });
     }
-    // Update exam record to completed status
+
+    if (record.studentId !== student.id) {
+      throw new TRPCError({ code: "FORBIDDEN", message: "Record mismatch" });
+    }
+
+    // Keep graded status for reports/dashboard while marking completion time.
+    // If the exam is finished before grading, keep it as completed.
+    const nextStatus = record.status === "graded" ? "graded" : "completed";
     await updateExamRecord(record.id, {
-      status: "completed",
+      status: nextStatus,
       completedAt: new Date(),
     });
     return { success: true, recordId: input.recordId };
@@ -396,30 +495,15 @@ const clientRouter = router({
     const assignment = assignments.find(a => a.questionId === input.questionId);
     const questionSet = assignment?.questionSet || 'a';
     
-    // Read the main score.sh script
-    const fs = require('fs');
-    const path = require('path');
-    const scoreScriptPath = path.join(__dirname, '../score.sh');
-    
-    if (!fs.existsSync(scoreScriptPath)) {
-      throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Score script not found" });
-    }
-    
-    let scriptContent = fs.readFileSync(scoreScriptPath, 'utf8');
-    
-    // Generate variable context for the script
-    const variables = generateVariableContext(questionSet, 0, student.clientUsername ?? "student");
-    
-    // Replace variables in the script content
-    Object.entries(variables).forEach(([placeholder, value]) => {
-      scriptContent = scriptContent.replace(new RegExp(placeholder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), value);
-    });
+    const username = student.clientUsername ?? "student";
+    const scriptContent = buildScoringScript(questionSet, username);
+    const variables = generateVariableContext(questionSet, 0, username);
     
     return {
       script: scriptContent,
       ruleName: `score_${questionSet}`,
       variables: variables,
-      username: student.clientUsername ?? "student",
+      username,
     };
   }),
 });

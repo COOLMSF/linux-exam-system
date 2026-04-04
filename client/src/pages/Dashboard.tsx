@@ -31,7 +31,7 @@ export default function Dashboard() {
   const { data: exams } = trpc.exams.list.useQuery();
   const { data: questions } = trpc.questions.list.useQuery({});
   const { data: students } = trpc.students.list.useQuery({});
-  const { data: records } = trpc.exams.records.useQuery({ examId: undefined });
+  const { data: records } = trpc.exams.records.useQuery({ examId: undefined }, { refetchInterval: 5000 });
   const [, setLocation] = useLocation();
 
   const activeExams = exams?.filter(e => e.status === "active") ?? [];
@@ -126,7 +126,13 @@ export default function Dashboard() {
                       {r.maxPossibleScore != null ? ` / ${r.maxPossibleScore}` : ""}
                     </p>
                     <p className="text-xs text-muted-foreground">
-                      {r.status === "graded" ? "已评分" : r.status === "submitted" ? "待评分" : "进行中"}
+                      {r.status === "graded"
+                        ? "已评分"
+                        : r.status === "completed"
+                          ? "已结束"
+                          : r.status === "submitted"
+                            ? "待评分"
+                            : "进行中"}
                     </p>
                   </div>
                 </div>

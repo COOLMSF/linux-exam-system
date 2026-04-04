@@ -234,11 +234,17 @@ class ExamAPIClient:
     def fetch_questions(self, exam_id: int) -> Dict[str, Any]:
         """获取考试题目"""
         logger.info(f"正在获取考试题目 (examId={exam_id})")
-        result = self._call("agentApi.fetchQuestions", {"examId": exam_id}, method="POST")
+        if not self.token:
+            raise AuthenticationError("Missing token, please authenticate first")
+        result = self._call(
+            "agentApi.fetchQuestions",
+            {"token": self.token, "examId": exam_id},
+            method="POST",
+        )
         return result
 
     def submit_score(self, token: str, exam_id: int, total_score: int, duration_seconds: int,
-                     script_output: str, details: List[Dict[str, Any]]) -> Dict[str, Any]:
+                     script_output: str, details: List[Dict[str, Any]], exam_meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """提交成绩"""
         logger.info(f"正在提交成绩 (examId={exam_id}, score={total_score})")
         return self._call(
@@ -249,6 +255,7 @@ class ExamAPIClient:
                 "totalScore": total_score,
                 "durationSeconds": duration_seconds,
                 "scriptOutput": script_output,
+                "examMeta": exam_meta,
                 "details": details,
             },
             method="POST"
@@ -362,7 +369,9 @@ class ScriptExecutor:
             line = line.strip()
             
             # 解析每道题得分：***第 X 题...得分***:N
-            match = re.search(r'\*\*\*第 (\d+) 题.*?得分\*\*\*:(\d+)', line)
+            # score.sh 输出格式一般是：***第1题xxx得分***:4
+            # 这里放宽空格匹配，兼容有/无空格的情况。
+            match = re.search(r'\*\*\*第\s*(\d+)\s*题.*?得分\*\*\*:(\d+)', line)
             if match:
                 question_num = int(match.group(1))
                 score = int(match.group(2))
@@ -426,11 +435,12 @@ class ScriptExecutor:
 class ExamController:
     """控制完整考试流程"""
 
-    def __init__(self, server_url: str, auto_mode: bool = False, exam_id: int = 1):
+    def __init__(self, server_url: str, auto_mode: bool = True, exam_id: int = 1):
         self.api = ExamAPIClient(server_url)
         self.executor = ScriptExecutor()
         self.sys_info = get_system_info()
         self.start_time: Optional[float] = None
+        self.client_started_at = datetime.now().isoformat()
         self.auto_mode = auto_mode  # 自动模式：无需确认直接评分
         self.exam_id = exam_id  # 考试 ID
 
@@ -553,29 +563,42 @@ class ExamController:
         if not self.auto_mode:
             print("[提示] 请在本机完成以上操作，完成后按 Enter 键开始评分")
         else:
-            print("[自动模式] 将在 5 秒后开始自动评分...")
-            time.sleep(5)
+            print("[自动模式] 考试开始即计时，完成后将自动评分并提交")
 
     def run_scoring(self, questions: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """执行评分流程（支持 score.sh 格式）"""
+        """执行评分流程（支持 score.sh 格式：一次性输出全部题目分数）"""
         username = self.sys_info["username"]
-        all_results = []
+
+        if not questions:
+            return {
+                "totalScore": 0,
+                "maxPossibleScore": 0,
+                "questionResults": [],
+                "completedAt": datetime.now().isoformat(),
+            }
+
+        scoring_script = questions[0].get("scoringScript")
+        if not scoring_script:
+            logger.warning("评分脚本缺失：无法自动评分")
+            return {
+                "totalScore": 0,
+                "maxPossibleScore": 0,
+                "questionResults": [],
+                "completedAt": datetime.now().isoformat(),
+            }
+
+        print("\n[评分] 开始执行评分脚本（一次性评分全部题目）...")
+        result = self.executor.execute_script(scoring_script, username)
+
+        question_scores = result.get("questionScores", {}) or {}
+
+        all_results: List[Dict[str, Any]] = []
         total_score = 0
         total_max = 0
 
-        print("\n[评分] 开始执行评分脚本...")
-
         for i, q in enumerate(questions, 1):
-            scoring_script = q.get("scoringScript")
-            if not scoring_script:
-                logger.warning(f"题目 {q.get('title')} 没有评分脚本，跳过")
-                continue
-
-            print(f"\n[评分] 正在评分第 {i} 题：{q.get('title', '')}...")
-            result = self.executor.execute_script(scoring_script, username)
-
-            q_score = result.get("totalScore", 0)
-            q_max = q.get("maxScore", 10)
+            q_score = int(question_scores.get(i, 0))
+            q_max = int(q.get("maxScore", 10))
             total_score += q_score
             total_max += q_max
 
@@ -584,14 +607,11 @@ class ExamController:
                 "questionTitle": q.get("title"),
                 "score": q_score,
                 "maxScore": q_max,
-                "details": result.get("details", []),
+                "details": [],
                 "rawOutput": result.get("rawOutput", ""),
             })
 
-            print(f"       得分：{q_score} / {q_max}")
-            for detail in result.get("details", []):
-                if not detail.get("passed", True):
-                    print(f"       ✗ {detail.get('description', '')} (-{detail.get('deduction', 0)}分)")
+            print(f"       第 {i} 题得分：{q_score} / {q_max}")
 
         print(f"\n[评分] 评分完成！总分：{total_score} / {total_max}")
         return {
@@ -629,8 +649,14 @@ class ExamController:
 
         # Step 4: 开始考试记录
         try:
-            record = self.api._call("agentApi.startExam", {"examId": exam["id"]}, method="POST")
+            record = self.api._call(
+                "agentApi.startExam",
+                {"token": self.api.token, "examId": exam["id"]},
+                method="POST",
+            )
             record_id = record.get("recordId")
+            # Exam start time: when client confirms the exam start.
+            self.start_time = time.time()
         except Exception as e:
             print(f"[错误] 开始考试失败：{e}")
             return 1
@@ -638,7 +664,7 @@ class ExamController:
         # Step 5: 显示题目
         self.display_questions(questions)
 
-        # 等待学生确认完成操作（自动模式跳过）
+        # 自动模式：客户端启动考试后即进入评分流程（可按需切换 --manual）
         if not self.auto_mode:
             print("\n完成所有操作后，请按 Enter 键开始评分...")
             try:
@@ -649,8 +675,7 @@ class ExamController:
         else:
             print("\n[自动模式] 开始执行评分...")
 
-        # Step 6: 执行评分
-        self.start_time = time.time()
+        # Step 6: 执行评分（考试开始时间记录在 startExam 调用之后）
         score_data = self.run_scoring(questions)
         duration_seconds = int(time.time() - self.start_time)
 
@@ -666,6 +691,20 @@ class ExamController:
                     "failedChecks": [d["description"] for d in r.get("details", []) if not d.get("passed", True)],
                 } for r in score_data.get("questionResults", [])]
 
+                exam_meta = {
+                    "examStartedAt": datetime.fromtimestamp(self.start_time).isoformat() if self.start_time else None,
+                    "examCompletedAt": datetime.now().isoformat(),
+                    "clientStartedAt": self.client_started_at,
+                    "hostname": self.sys_info.get("hostname"),
+                    "os": self.sys_info.get("os"),
+                    "osVersion": self.sys_info.get("os_version"),
+                    "arch": self.sys_info.get("arch"),
+                    "deviceId": self.sys_info.get("device_id"),
+                    "username": self.sys_info.get("username"),
+                    "questionSet": questions[0].get("questionSet") if questions else None,
+                    "questionCount": len(questions),
+                }
+
                 result = self.api.submit_score(
                     token=self.api.token,
                     exam_id=exam["id"],
@@ -673,6 +712,7 @@ class ExamController:
                     duration_seconds=duration_seconds,
                     script_output=json.dumps(score_data, ensure_ascii=False, indent=2),
                     details=details,
+                    exam_meta=exam_meta,
                 )
                 print(f"[完成] 成绩已成功上传！")
                 print(f"       最终得分：{score_data['totalScore']} / {score_data['maxPossibleScore']}")
@@ -706,7 +746,7 @@ class ExamController:
             # 调用 API 结束考试
             result = self.api._call(
                 "agentApi.finishExam",
-                {"recordId": record_id},
+                {"token": self.api.token, "recordId": record_id},
                 method="POST"
             )
             if result:
@@ -748,8 +788,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  %(prog)s                          # 使用默认配置启动（手动确认模式）
-  %(prog)s --auto                   # 自动评分模式（无需确认）
+  %(prog)s                          # 使用默认配置启动（自动评分模式）
+  %(prog)s --manual                 # 手动评分模式（需按 Enter 确认）
   %(prog)s --server http://192.168.1.100:3000  # 指定服务器地址
   %(prog)s --config                 # 进入配置模式
   %(prog)s --test-connection        # 测试服务器连接
@@ -758,7 +798,8 @@ def main():
     parser.add_argument("--server", "-s", help="服务器地址 (默认：http://localhost:3000)")
     parser.add_argument("--config", "-c", action="store_true", help="进入配置模式")
     parser.add_argument("--test-connection", "-t", action="store_true", help="测试服务器连接")
-    parser.add_argument("--auto", "-a", action="store_true", help="自动评分模式（无需按 Enter 确认）")
+    parser.add_argument("--auto", "-a", action="store_true", help="自动评分模式（默认，可省略）")
+    parser.add_argument("--manual", "-m", action="store_true", help="手动评分模式（需按 Enter 确认）")
     parser.add_argument("--exam-id", "-e", type=int, default=1, help="考试 ID (默认：1)")
     parser.add_argument("--version", "-v", action="version", version="ExamAgent 1.2")
     args = parser.parse_args()
@@ -792,7 +833,10 @@ def main():
             print(f"[失败] 无法连接到服务器：{e}")
             return 1
 
-    controller = ExamController(server_url, auto_mode=args.auto, exam_id=args.exam_id)
+    auto_mode = not args.manual
+    if args.auto:
+        auto_mode = True
+    controller = ExamController(server_url, auto_mode=auto_mode, exam_id=args.exam_id)
     return controller.run()
 
 

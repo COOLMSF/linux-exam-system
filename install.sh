@@ -60,6 +60,9 @@ for arg in "$@"; do
     --status)      MODE="status"       ;;
     --demo-exam)   MODE="demo-exam"    ;;
     --reset-db)    MODE="reset-db"     ;;
+    --package-client) MODE="package-client" ;;
+    --package-server) MODE="package-server" ;;
+    --package-all)    MODE="package-all" ;;
     --help|-h)
       echo ""
       echo -e "\033[1m用法:\033[0m sudo bash install.sh [选项]"
@@ -91,7 +94,7 @@ for arg in "$@"; do
       echo "  --test-only     仅运行测试验证（不安装）"
       echo ""
       echo "维护模式（需要 root 权限）："
-      echo "  --reset-db      重置数据库（删除所有数据并重新初始化）"
+      echo "  --reset-db      重置管理员密码（保留所有数据）"
       echo ""
       echo "环境变量："
       echo "  MYSQL_ROOT_PASSWORD   MySQL root 密码（数据库初始化时需要）"
@@ -109,7 +112,7 @@ for arg in "$@"; do
       echo "  bash install.sh --package-server        # 打包服务端"
       echo "  bash install.sh --package-all           # 打包全部用于分发"
       echo "  bash install.sh --demo-exam             # 演示考试全流程测试（含 score.sh）"
-      echo "  sudo bash install.sh --reset-db         # 重置数据库（清空所有数据）"
+      echo "  sudo bash install.sh --reset-db         # 重置管理员密码（保留所有数据）"
       echo "  export MYSQL_ROOT_PASSWORD='your_pass' && bash install.sh  # 指定 MySQL 密码"
       exit 0
       ;;
@@ -119,7 +122,7 @@ done
 # ─── 权限检查 ─────────────────────────────────────────────────────────────────
 check_root() {
   # 以下模式不需要 root
-  if [[ "$MODE" == "easy-test" || "$MODE" == "test-only" || "$MODE" == "test-score" || "$MODE" == "dev" || "$MODE" == "start" || "$MODE" == "stop" || "$MODE" == "status" || "$MODE" == "reset-db" ]]; then
+  if [[ "$MODE" == "easy-test" || "$MODE" == "test-only" || "$MODE" == "test-score" || "$MODE" == "dev" || "$MODE" == "start" || "$MODE" == "stop" || "$MODE" == "status" || "$MODE" == "reset-db" || "$MODE" == "package-client" || "$MODE" == "package-server" || "$MODE" == "package-all" ]]; then
     return 0
   fi
   if [[ $EUID -ne 0 ]]; then
@@ -128,6 +131,90 @@ check_root() {
     log_warn "仅验证环境： bash install.sh --test-only"
     exit 1
   fi
+}
+
+# ─── 打包：客户端 Agent（单文件可执行）──────────────────────────────────────────
+package_client() {
+  log_section "打包客户端 Agent（生成单文件可执行）"
+
+  local agent_dir="$SCRIPT_DIR/client_agent"
+  if [[ ! -f "$agent_dir/exam_agent.py" ]]; then
+    log_error "未找到 client_agent/exam_agent.py，请确保在项目根目录运行"
+    exit 1
+  fi
+
+  local out_dir="$SCRIPT_DIR/dist/client_agent"
+  mkdir -p "$out_dir"
+
+  # 优先使用 manylinux2014 容器构建，获得更老 glibc 兼容性（Ubuntu / 麒麟更稳）
+  if command -v docker &>/dev/null; then
+    log_info "检测到 Docker，使用 manylinux2014 容器进行兼容构建（推荐）..."
+    rm -rf "$agent_dir/build" "$agent_dir/dist" "$agent_dir/__pycache__" 2>/dev/null || true
+
+    docker run --rm \
+      -v "$SCRIPT_DIR:/work" \
+      -w /work/client_agent \
+      quay.io/pypa/manylinux2014_x86_64 \
+      bash -lc "
+        set -euo pipefail
+        PY=/opt/python/cp311-cp311/bin/python
+        \$PY -m pip install -U pip wheel setuptools >/dev/null
+        \$PY -m pip install -r requirements.txt >/dev/null
+        \$PY -m PyInstaller exam_agent.spec --noconfirm --clean
+      " 2>>"$LOG_FILE" || {
+        log_warn "manylinux 构建失败，回退到本机构建（可能兼容性略差）"
+      }
+
+    if [[ -f "$agent_dir/dist/exam_agent" ]]; then
+      cp -f "$agent_dir/dist/exam_agent" "$out_dir/exam_agent-linux-x86_64" || true
+      chmod +x "$out_dir/exam_agent-linux-x86_64" || true
+      log_ok "已生成: $out_dir/exam_agent-linux-x86_64"
+      log_info "运行示例: $out_dir/exam_agent-linux-x86_64 --help"
+      return 0
+    fi
+  fi
+
+  # 回退：本机构建（仍然是单文件可执行，但依赖本机 glibc 版本）
+  log_info "使用本机 Python + PyInstaller 构建..."
+  if ! command -v python3 &>/dev/null; then
+    log_error "未找到 python3，无法打包。请先安装 Python 3"
+    exit 1
+  fi
+
+  local venv_dir="$SCRIPT_DIR/.packaging/venv"
+  mkdir -p "$SCRIPT_DIR/.packaging"
+  python3 -m venv "$venv_dir" 2>>"$LOG_FILE"
+  # shellcheck disable=SC1091
+  source "$venv_dir/bin/activate"
+  pip install -U pip wheel setuptools >/dev/null 2>>"$LOG_FILE"
+  pip install -r "$agent_dir/requirements.txt" >/dev/null 2>>"$LOG_FILE"
+
+  rm -rf "$agent_dir/build" "$agent_dir/dist" 2>/dev/null || true
+  (cd "$agent_dir" && pyinstaller exam_agent.spec --noconfirm --clean) 2>>"$LOG_FILE"
+
+  if [[ -f "$agent_dir/dist/exam_agent" ]]; then
+    cp -f "$agent_dir/dist/exam_agent" "$out_dir/exam_agent-linux-x86_64" || true
+    chmod +x "$out_dir/exam_agent-linux-x86_64" || true
+    log_ok "已生成: $out_dir/exam_agent-linux-x86_64"
+    log_info "运行示例: $out_dir/exam_agent-linux-x86_64 --help"
+  else
+    log_error "打包失败：未生成 $agent_dir/dist/exam_agent（详见日志：$LOG_FILE）"
+    exit 1
+  fi
+}
+
+# ─── 打包：服务端（占位，后续可扩展）────────────────────────────────────────────
+package_server() {
+  log_section "打包服务端（部署包）"
+  log_error "当前脚本尚未实现 --package-server。请告诉我你希望的产物形态：tar.gz（含 dist + node_modules）还是自带 node 二进制的完全离线包。"
+  exit 1
+}
+
+# ─── 打包：全部（客户端 + 服务端）──────────────────────────────────────────────
+package_all() {
+  log_section "打包全部（客户端 + 服务端 + 部署脚本）"
+  package_client
+  package_server
 }
 
 # ─── 扩展 PATH，兼容 nvm / 麒麟系统非标准路径 ──────────────────────────────────
@@ -461,6 +548,19 @@ demo_exam_test() {
   local project_dir="$SCRIPT_DIR"
   local test_student="demo_student"
   local test_password="Demo123456"
+
+  # Prefer the maintained Python E2E script, which also writes test-reports/*.json
+  if [[ -f "$project_dir/demo_exam_test.py" ]]; then
+    log_info "调用 demo_exam_test.py 执行一键考试测试并生成报告..."
+    cd "$project_dir"
+    if python3 demo_exam_test.py; then
+      log_ok "一键考试测试通过"
+      return 0
+    else
+      log_error "demo_exam_test.py 执行失败"
+      return 1
+    fi
+  fi
 
   echo ""
   echo "本测试将模拟完整的考试流程："
@@ -1421,92 +1521,68 @@ MYSQL_SCRIPT
     local encoded_password
     encoded_password=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${db_password}', safe=''))" 2>/dev/null || echo "${db_password}")
     sed -i "s|^DATABASE_URL=.*|DATABASE_URL=mysql://exam_user:${encoded_password}@localhost:3306/linux_exam|" "$env_file"
-  fi
 
-  log_ok "数据库连接信息已写入 .env"
+    log_ok "数据库连接信息已写入 .env"
+  fi
 }
 
-# ─── 数据库重置 ───────────────────────────────────────────────────────────────
+# ─── 重置管理员密码 ─────────────────────────────────────────────────────────────
 reset_database() {
-  log_section "重置数据库"
+  log_section "重置管理员密码"
 
-  echo -e "${YELLOW}${BOLD}⚠️  警告：此操作将删除所有考试数据！${NC}"
+  echo -e "${CYAN}${BOLD}🔑 管理员密码重置工具${NC}"
   echo ""
   echo "  此操作将："
-  echo "    1. 删除现有的 linux_exam 数据库"
-  echo "    2. 删除 exam_user 用户"
-  echo "    3. 重新创建数据库和用户"
-  echo "    4. 重新运行数据库迁移"
-  echo ""
-  echo -e "${RED}  所有考试记录、学生信息、题目等数据将永久丢失！${NC}"
+  echo "    1. 重置所有管理员账号的密码"
+  echo "    2. 创建新的默认管理员账号（如果不存在）"
+  echo "    3. 保留所有考试数据和学生信息"
   echo ""
 
   # 确认提示
-  read -r -p "  确定要继续吗？(输入 yes 确认): " confirm
+  read -r -p "  确定要重置管理员密码吗？(输入 yes 确认): " confirm
 
   if [[ "$confirm" != "yes" ]]; then
     log_warn "用户取消操作"
     exit 0
   fi
 
-  log_info "开始重置数据库..."
+  log_info "开始重置管理员密码..."
 
-  # 1. 停止服务（如果正在运行）
-  log_info "停止服务..."
-  if command -v systemctl &>/dev/null && systemctl is-active linux-exam &>/dev/null 2>&1; then
-    systemctl stop linux-exam 2>/dev/null || true
-    log_ok "系统服务已停止"
-  fi
-
-  # 2. 删除旧数据库和用户
-  log_info "删除旧数据库和用户..."
-  mysql -h localhost -u root <<MYSQL_SCRIPT
--- 删除数据库
-DROP DATABASE IF EXISTS linux_exam;
-
--- 删除用户
-DROP USER IF EXISTS 'exam_user'@'localhost';
-
--- 刷新权限
-FLUSH PRIVILEGES;
-
-SELECT 'Old database and user deleted' AS status;
-MYSQL_SCRIPT
-
-  if [[ $? -ne 0 ]]; then
-    log_error "删除旧数据库失败"
+  # 优先使用已安装服务的 .env（/opt/linux-exam-system/.env），回退到本地 .env
+  local env_file=""
+  if [[ -f "$INSTALL_DIR/.env" ]]; then
+    env_file="$INSTALL_DIR/.env"
+    log_info "使用已安装服务配置: $env_file"
+  elif [[ -f "$SCRIPT_DIR/.env" ]]; then
+    env_file="$SCRIPT_DIR/.env"
+    log_info "使用本地配置: $env_file"
+  else
+    log_error "未找到 .env 配置文件，请先运行安装脚本"
     exit 1
   fi
 
-  log_ok "旧数据库已删除"
-
-  # 3. 重新初始化数据库
-  init_database
-
-  # 4. 重新运行迁移
-  run_database_migration
-
-  # 5. 重启服务
-  log_info "重启服务..."
-  if command -v systemctl &>/dev/null && [[ -f /etc/systemd/system/linux-exam.service ]]; then
-    systemctl daemon-reload
-    systemctl start linux-exam
-    systemctl enable linux-exam 2>/dev/null || true
-    log_ok "系统服务已重启"
+  # 确定 node_modules 路径
+  local node_cwd=""
+  if [[ -d "$INSTALL_DIR/node_modules" ]]; then
+    node_cwd="$INSTALL_DIR"
+  else
+    node_cwd="$SCRIPT_DIR"
   fi
 
-  # 6. 创建默认管理员账号
-  log_info "创建默认管理员账号..."
-  
-  # 使用 Node.js 脚本创建默认管理员
-  node << 'NODESCRIPT'
-const { nanoid } = require('nanoid');
+  # 使用 Node.js 脚本重置管理员密码
+  log_info "连接数据库并重置密码..."
+  cd "$node_cwd" && ENV_FILE="$env_file" node << 'NODESCRIPT'
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-// 读取 .env 获取数据库配置
-const envPath = path.join(process.cwd(), '.env');
+// 生成随机ID函数（替代nanoid）
+function generateId(length = 21) {
+  return crypto.randomBytes(length).toString('base64').replace(/[+/=]/g, '').slice(0, length);
+}
+
+// 读取 .env 获取数据库配置（优先 ENV_FILE 环境变量，回退到 cwd/.env）
+const envPath = process.env.ENV_FILE || path.join(process.cwd(), '.env');
 const envContent = fs.readFileSync(envPath, 'utf-8');
 const dbUrl = envContent.match(/^DATABASE_URL=(.+)$/m)?.[1];
 
@@ -1528,11 +1604,12 @@ const mysql = require('mysql2/promise');
 // 密码哈希函数
 function makePasswordHash(password) {
   const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.createHash('sha256').update(salt + password + salt).digest('hex');
+  const hash = crypto.createHash('sha256')
+    .update(salt + password + salt).digest('hex');
   return salt + ':' + hash;
 }
 
-async function createDefaultAdmin() {
+async function resetAdminPasswords() {
   let connection;
   try {
     // URL decode password for mysql connection
@@ -1547,78 +1624,57 @@ async function createDefaultAdmin() {
     
     console.log('数据库连接成功');
     
-    // 检查是否已有管理员账号
+    // 生成新的管理员密码
+    const newPassword = 'Admin' + Math.random().toString(36).slice(-8);
+    const passwordHash = makePasswordHash(newPassword);
+    
+    // 重置所有现有管理员的密码
     const [adminRows] = await connection.execute(`
+      UPDATE users SET passwordHash = ? WHERE role = 'admin'
+    `, [passwordHash]);
+    
+    console.log(`✓ 已重置 ${adminRows.affectedRows} 个管理员账号的密码`);
+    
+    // 如果没有管理员账号，创建一个默认的
+    const [countResult] = await connection.execute(`
       SELECT COUNT(*) as count FROM users WHERE role = 'admin'
     `);
     
-    if (adminRows[0].count > 0) {
-      console.log('已有管理员账号，跳过创建');
-      await connection.end();
-      return;
+    if (countResult[0].count === 0) {
+      const openId = 'local-admin-' + generateId(12);
+      await connection.execute(`
+        INSERT INTO users (openId, name, loginMethod, role, passwordHash, createdAt, lastSignedIn)
+        VALUES (?, ?, ?, ?, ?, NOW(), NOW())
+      `, [openId, 'admin', 'local', 'admin', passwordHash]);
+      
+      console.log('✓ 创建了新的默认管理员账号');
     }
     
-    // 创建默认管理员账号
-    const openId = 'local-admin-' + nanoid(12);
-    const username = 'admin';
-    const password = 'Admin123456';
-    const passwordHash = makePasswordHash(password);
-    
-    await connection.execute(`
-      INSERT INTO users (openId, name, loginMethod, role, passwordHash, createdAt, lastSignedIn)
-      VALUES (?, ?, ?, ?, ?, NOW(), NOW())
-    `, [openId, username, 'local', 'admin', passwordHash]);
-    
-    console.log('✓ 默认管理员账号创建成功');
+    console.log('');
+    console.log('========================================');
+    console.log('  管理员账号重置成功！');
     console.log('  用户名：admin');
-    console.log('  密码：Admin123456');
-    console.log('  请登录后及时修改密码');
+    console.log(`  新密码：${newPassword}`);
+    console.log('  请登录后及时修改密码！');
+    console.log('========================================');
     
     await connection.end();
   } catch (error) {
-    console.error('创建默认管理员失败:', error.message);
+    console.error('重置管理员密码失败:', error.message);
     if (connection) await connection.end();
     process.exit(1);
   }
 }
 
-createDefaultAdmin();
+resetAdminPasswords();
 NODESCRIPT
   
   if [[ $? -eq 0 ]]; then
-    log_ok "默认管理员账号创建成功"
+    log_ok "管理员密码重置成功"
   else
-    log_warn "创建默认管理员账号失败，请手动创建"
+    log_error "管理员密码重置失败，请检查数据库连接"
+    exit 1
   fi
-
-  # 7. 显示新配置
-  log_section "数据库重置完成"
-
-  echo ""
-  echo -e "${GREEN}${BOLD}✓ 数据库已成功重置！${NC}"
-  echo ""
-
-  # 读取新密码
-  local new_pass=""
-  if [[ -f "$SCRIPT_DIR/.env" ]]; then
-    new_pass=$(grep "^DATABASE_URL=" "$SCRIPT_DIR/.env" | sed -E 's|mysql://[^:]+:([^@]+)@.*|\1|')
-    new_pass=$(printf '%b' "${new_pass//%/\\x}")
-  fi
-
-  echo -e "  新的数据库连接信息："
-  echo -e "    ${CYAN}数据库名：linux_exam${NC}"
-  echo -e "    ${CYAN}用户名：exam_user${NC}"
-  echo -e "    ${CYAN}密码：${new_pass}${NC}"
-  echo ""
-  echo -e "  默认管理员账号："
-  echo -e "    ${CYAN}用户名：admin${NC}"
-  echo -e "    ${CYAN}密码：Admin123456${NC}"
-  echo -e "    ${YELLOW}请登录后及时修改密码！${NC}"
-  echo ""
-  echo -e "  配置文件已更新：${CYAN}$SCRIPT_DIR/.env${NC}"
-  echo ""
-  echo -e "${YELLOW}提示：请妥善保管新的数据库密码和管理员账号！${NC}"
-  echo ""
 }
 
 # ─── 数据库迁移 ───────────────────────────────────────────────────────────────
@@ -1973,6 +2029,15 @@ main() {
       ;;
     reset-db)
       reset_database
+      ;;
+    package-client)
+      package_client
+      ;;
+    package-server)
+      package_server
+      ;;
+    package-all)
+      package_all
       ;;
   esac
 }

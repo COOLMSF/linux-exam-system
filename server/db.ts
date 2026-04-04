@@ -64,14 +64,14 @@ export async function upsertUser(user: InsertUser): Promise<void> {
 export async function getUserByOpenId(openId: string) {
   const db = await getDb();
   if (!db) return undefined;
-  const r = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
+  const r = await db.select().from(users).where(eq(users.openId, openId));
   return r[0];
 }
 
 export async function getUserByName(name: string) {
   const db = await getDb();
   if (!db) return undefined;
-  const r = await db.select().from(users).where(eq(users.name, name)).limit(1);
+  const r = await db.select().from(users).where(eq(users.name, name));
   return r[0];
 }
 
@@ -252,11 +252,23 @@ export function generateVariableContext(questionSet: string, questionIndex: numb
       context['{{a_dbname}}'] = 'DAMENG';
       context['{{a_instance}}'] = 'PROD';
       context['{{a_port}}'] = '5236';
+
+      // Generic expected values for scoring script templates
+      context['{{db_expected}}'] = context['{{a_dbname}}'];
+      context['{{instance_expected}}'] = context['{{a_instance}}'];
+      context['{{port_expected}}'] = context['{{a_port}}'];
+      context['{{user_expected}}'] = context['{{a_dbname}}'];
       break;
     case 'b':
       context['{{b_dbname}}'] = 'DMEXAM';
       context['{{b_instance}}'] = 'TEST';
       context['{{b_port}}'] = '5237';
+
+      // Generic expected values for scoring script templates
+      context['{{db_expected}}'] = context['{{b_dbname}}'];
+      context['{{instance_expected}}'] = context['{{b_instance}}'];
+      context['{{port_expected}}'] = context['{{b_port}}'];
+      context['{{user_expected}}'] = context['{{b_dbname}}'];
       break;
     // Add more cases for additional question sets as needed
   }
@@ -362,9 +374,11 @@ export async function getAssignmentsForStudent(examId: number, studentId: number
   const db = await getDb();
   if (!db) return [];
   return db.select({
-    id: examQuestionAssignments.id,
+    // Client Agent expects `id` to be the question's id and `content` to be personalized question content.
+    id: examQuestionAssignments.questionId,
     questionId: examQuestionAssignments.questionId,
-    personalizedContent: examQuestionAssignments.personalizedContent,
+    assignmentId: examQuestionAssignments.id,
+    content: examQuestionAssignments.personalizedContent,
     sortOrder: examQuestionAssignments.sortOrder,
     questionSet: examQuestionAssignments.questionSet,
     title: questions.title,
@@ -430,6 +444,7 @@ export async function listExamRecords(examId?: number) {
     startedAt: examRecords.startedAt,
     submittedAt: examRecords.submittedAt,
     gradedAt: examRecords.gradedAt,
+    completedAt: examRecords.completedAt,
   }).from(examRecords)
     .leftJoin(students, eq(examRecords.studentId, students.id))
     .$dynamic();

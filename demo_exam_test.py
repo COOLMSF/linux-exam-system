@@ -27,6 +27,9 @@ import time
 import subprocess
 import signal
 import atexit
+from datetime import datetime
+from pathlib import Path
+from urllib.parse import urlparse, unquote
 
 # 添加 client_agent 到路径
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -116,14 +119,14 @@ def start_dev_server():
     return False
 
 def create_test_data():
-    """创建测试数据"""
+    """创建测试数据并返回考试 ID"""
     log_section("创建测试数据")
     
     # 读取数据库配置
     env_file = os.path.join(script_dir, '.env')
     if not os.path.exists(env_file):
         log_error(".env 文件不存在")
-        return False
+        return None
     
     with open(env_file, 'r', encoding='utf-8') as f:
         env_content = f.read()
@@ -132,39 +135,45 @@ def create_test_data():
     match = re.search(r'^DATABASE_URL=(.+)$', env_content, re.MULTILINE)
     if not match:
         log_error("未找到 DATABASE_URL 配置")
-        return False
+        return None
     
     db_url = match.group(1)
     
-    # 解析数据库连接
-    db_match = re.match(r'mysql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)', db_url)
-    if not db_match:
+    # 解析数据库连接（兼容 URL 编码密码）
+    parsed = urlparse(db_url)
+    if parsed.scheme != "mysql" or not parsed.hostname or not parsed.username or not parsed.path:
         log_error("无法解析 DATABASE_URL")
-        return False
+        return None
+    user = parsed.username
+    password = unquote(parsed.password or "")
+    host = parsed.hostname
+    port = parsed.port or 3306
+    database = parsed.path.lstrip("/")
     
-    user, password, host, port, database = db_match.groups()
-    
-    # 创建 Node.js 脚本
+    db_cfg = json.dumps({
+        "host": host,
+        "port": int(port),
+        "user": user,
+        "password": password,
+        "database": database,
+    }, ensure_ascii=False)
+
+    # 创建 Node.js 脚本（与当前 schema 保持一致）
     node_script = f'''
 const mysql = require('mysql2/promise');
 const crypto = require('crypto');
+const dbCfg = {db_cfg};
 
 async function createTestData() {{
   let connection;
   try {{
-    connection = await mysql.createConnection({{
-      host: '{host}',
-      port: {port},
-      user: '{user}',
-      password: '{password}',
-      database: '{database}'
-    }});
+    connection = await mysql.createConnection(dbCfg);
     
     console.log('数据库连接成功');
     
     // 1. 创建管理员
     await connection.execute(`
-      INSERT INTO users (open_id, name, login_method, role, created_at, last_signed_in)
+      INSERT INTO users (openId, name, loginMethod, role, createdAt, lastSignedIn)
       VALUES ('demo-admin', 'Demo Admin', 'local', 'admin', NOW(), NOW())
       ON DUPLICATE KEY UPDATE name='Demo Admin'
     `);
@@ -173,17 +182,13 @@ async function createTestData() {{
     const hash = crypto.createHash('sha256').update(salt + 'Admin123456' + salt).digest('hex');
     const passwordHash = salt + ':' + hash;
     
-    await connection.execute(`
-      INSERT INTO user_passwords (user_id, password_hash)
-      SELECT id, ? FROM users WHERE open_id = 'demo-admin'
-      ON DUPLICATE KEY UPDATE password_hash = ?
-    `, [passwordHash, passwordHash]);
+    await connection.execute(`UPDATE users SET passwordHash = ? WHERE openId = 'demo-admin'`, [passwordHash]);
     
     console.log('✓ 管理员账号创建成功 (demo-admin / Admin123456)');
     
     // 2. 创建学生
     await connection.execute(`
-      INSERT INTO students (student_id, name, class_name, is_active, created_at, updated_at)
+      INSERT INTO students (studentId, name, className, isActive, createdAt, updatedAt)
       VALUES ('demo_student', '演示学生', 'Demo Class', 1, NOW(), NOW())
       ON DUPLICATE KEY UPDATE name='演示学生'
     `);
@@ -191,27 +196,26 @@ async function createTestData() {{
     
     // 3. 创建分类
     await connection.execute(`
-      INSERT INTO categories (name, description)
+      INSERT INTO question_categories (name, description)
       VALUES ('DM8 数据库', '达梦数据库操作题目')
       ON DUPLICATE KEY UPDATE description='达梦数据库操作题目'
     `);
     
-    const [catRows] = await connection.execute('SELECT id FROM categories WHERE name = "DM8 数据库"');
+    const [catRows] = await connection.execute('SELECT id FROM question_categories WHERE name = "DM8 数据库"');
     const categoryId = catRows[0].id;
     
     // 删除旧题目
-    await connection.execute('DELETE FROM questions WHERE category_id = ?', [categoryId]);
+    await connection.execute('DELETE FROM questions WHERE categoryId = ?', [categoryId]);
     
     // 创建题目 1
     await connection.execute(`
-      INSERT INTO questions (title, content, category_id, difficulty, max_score, scoring_script, is_active, sort_order)
+      INSERT INTO questions (title, content, categoryId, difficulty, maxScore, isActive, sortOrder)
       VALUES (
         '数据库软件卸载',
         '请完成以下操作：\\\\n1. 停止数据库服务\\\\n2. 卸载数据库软件\\\\n3. 清理数据库进程',
         ?,
         2,
         10,
-        '#!/bin/bash\\\\nscore=10\\\\nif [ -d "/home/dmdba/dmdbms/jar" ]; then\\\\n  score=$((score - 4))\\\\n  echo "数据库软件目录仍存在:-4"\\\\nfi\\\\necho "总分：$score"',
         1,
         1
       )
@@ -219,14 +223,13 @@ async function createTestData() {{
     
     // 创建题目 2
     await connection.execute(`
-      INSERT INTO questions (title, content, category_id, difficulty, max_score, scoring_script, is_active, sort_order)
+      INSERT INTO questions (title, content, categoryId, difficulty, maxScore, isActive, sortOrder)
       VALUES (
         '数据库软件安装',
         '请完成以下操作：\\\\n1. 安装数据库软件\\\\n2. 创建 dmdba 用户\\\\n3. 注册数据库服务',
         ?,
         2,
         10,
-        '#!/bin/bash\\\\nscore=10\\\\nif [ ! -f "/home/dmdba/dmdbms/bin/dmserver" ]; then\\\\n  score=$((score - 5))\\\\n  echo "数据库未安装:-5"\\\\nfi\\\\necho "总分：$score"',
         1,
         2
       )
@@ -235,20 +238,21 @@ async function createTestData() {{
     console.log('✓ 考试题目创建成功 (2 道题目)');
     
     // 4. 创建考试场次
+    await connection.execute('DELETE FROM exam_sessions WHERE name = "DM8 数据库操作考试"');
     await connection.execute(`
-      INSERT INTO exam_sessions (name, description, duration_minutes, question_count, status, category_filter, created_at)
+      INSERT INTO exam_sessions (name, description, durationMinutes, questionCount, status, categoryFilter, createdAt)
       VALUES (
         'DM8 数据库操作考试',
         '达梦数据库安装与配置实操考试',
         60,
         2,
         'active',
-        ?,
+        CAST(? AS JSON),
         NOW()
       )
-    `, [categoryId]);
+    `, [JSON.stringify([categoryId])]);
     
-    const [examRows] = await connection.execute('SELECT id FROM exam_sessions WHERE name = "DM8 数据库操作考试"');
+    const [examRows] = await connection.execute('SELECT id FROM exam_sessions WHERE name = "DM8 数据库操作考试" ORDER BY id DESC LIMIT 1');
     const examId = examRows[0].id;
     console.log(`✓ 考试场次创建成功 (ID: ${{examId}})`);
     
@@ -269,8 +273,7 @@ async function createTestData() {{
   }}
 }}
 
-createTestData();
-process.exit(0);
+createTestData().then(() => process.exit(0)).catch(() => process.exit(1));
 '''
     
     # 执行 Node.js 脚本
@@ -285,15 +288,23 @@ process.exit(0);
     if result.stderr:
         print(result.stderr)
     
-    return result.returncode == 0
+    if result.returncode != 0:
+        return None
 
-def run_demo_exam():
+    exam_id_match = None
+    for line in result.stdout.splitlines():
+        if "考试 ID:" in line:
+            try:
+                exam_id_match = int(line.split("考试 ID:")[1].strip())
+            except Exception:
+                pass
+    return exam_id_match
+
+def run_demo_exam(exam_id: int):
     """运行演示考试（自动评分模式）"""
     log_section("运行演示考试（自动评分）")
 
     server_url = "http://localhost:3000"
-    exam_id = 1
-
     print("\n[演示] 开始考试流程测试（自动模式）\n")
 
     # 1. 获取系统信息
@@ -349,6 +360,7 @@ def run_demo_exam():
     print(f"\n[演示] 开始考试...")
     try:
         record = api._call("agentApi.startExam", {
+            "token": api.token,
             "examId": exam_id
         }, method="POST")
         record_id = record.get("recordId")
@@ -357,27 +369,25 @@ def run_demo_exam():
         log_error(f"开始考试失败：{e}")
         return False
 
-    # 6. 执行评分（自动模式）
+    # 6. 执行评分（自动模式，一次执行整套 score.sh）
     print(f"\n[演示] 执行自动评分...")
     executor = ScriptExecutor(timeout=60)
+    script = questions[0].get("scoringScript")
+    if not script:
+        log_error("题目缺少 scoringScript")
+        return False, None
+
+    result = executor.execute_script(script, username)
+    question_scores = result.get("questionScores", {}) or {}
+
     all_results = []
     total_score = 0
     total_max = 0
-
     for i, q in enumerate(questions, 1):
-        script = q.get("scoringScript")
-        if not script:
-            print(f"  题目 {i}: 无评分脚本，跳过")
-            continue
-
-        print(f"  评分题目 {i}: {q.get('title')}...")
-        result = executor.execute_script(script, username)
-
-        q_score = result.get("totalScore", 0)
-        q_max = q.get("maxScore", 10)
+        q_score = int(question_scores.get(i, 0))
+        q_max = int(q.get("maxScore", 10))
         total_score += q_score
         total_max += q_max
-
         all_results.append({
             "questionId": q.get("id"),
             "questionTitle": q.get("title"),
@@ -385,8 +395,7 @@ def run_demo_exam():
             "maxScore": q_max,
             "details": result.get("details", []),
         })
-
-        print(f"    得分：{q_score} / {q_max}")
+        print(f"    题目 {i} 得分：{q_score} / {q_max}")
 
     print(f"\n[演示] 评分完成！总分：{total_score} / {total_max}")
 
@@ -398,10 +407,30 @@ def run_demo_exam():
             "examId": exam_id,
             "totalScore": total_score,
             "durationSeconds": 60,
-            "scriptOutput": json.dumps(all_results, ensure_ascii=False),
+            "scriptOutput": json.dumps({
+                "summary": {
+                    "totalScore": total_score,
+                    "maxPossibleScore": total_max,
+                },
+                "questionResults": all_results,
+                "rawOutput": result.get("rawOutput", ""),
+            }, ensure_ascii=False),
+            "examMeta": {
+                "examStartedAt": datetime.now().isoformat(),
+                "examCompletedAt": datetime.now().isoformat(),
+                "clientStartedAt": datetime.now().isoformat(),
+                "hostname": sys_info.get("hostname"),
+                "os": sys_info.get("os"),
+                "osVersion": sys_info.get("os_version"),
+                "arch": sys_info.get("arch"),
+                "deviceId": sys_info.get("device_id"),
+                "username": username,
+                "questionSet": questions[0].get("questionSet"),
+                "questionCount": len(questions),
+            },
             "details": [{
                 "questionId": q.get("id"),
-                "earnedScore": q.get("totalScore", 0),
+                "earnedScore": q.get("score", 0),
                 "maxScore": q.get("maxScore", 10),
                 "failedChecks": []
             } for q in all_results]
@@ -417,6 +446,7 @@ def run_demo_exam():
     print(f"\n[演示] 结束考试...")
     try:
         result = api._call("agentApi.finishExam", {
+            "token": api.token,
             "recordId": record_id
         }, method="POST")
         log_ok("考试已结束")
@@ -429,7 +459,20 @@ def run_demo_exam():
     print(f"  考试记录 ID: {record_id}")
     print(f"{'='*60}")
 
-    return True
+    report = {
+        "timestamp": datetime.now().isoformat(),
+        "server": server_url,
+        "examId": exam_id,
+        "recordId": record_id,
+        "questionCount": len(questions),
+        "score": {
+            "total": total_score,
+            "max": total_max,
+        },
+        "questionSet": questions[0].get("questionSet") if questions else None,
+        "status": "success",
+    }
+    return True, report
 
 def main():
     """主函数"""
@@ -455,12 +498,20 @@ def main():
         log_ok("服务已运行")
     
     # 2. 创建测试数据
-    if not create_test_data():
+    exam_id = create_test_data()
+    if not exam_id:
         return 1
     
     # 3. 运行演示考试
-    if not run_demo_exam():
+    ok, report = run_demo_exam(exam_id)
+    if not ok:
         return 1
+
+    report_dir = Path(script_dir) / "test-reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_file = report_dir / f"demo_exam_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    with open(report_file, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
     
     # 4. 显示结果
     log_section("测试完成")
@@ -475,6 +526,8 @@ def main():
     print("  1. 登录管理后台")
     print("  2. 进入'考试管理'页面")
     print("  3. 查看'DM8 数据库操作考试'的成绩")
+    print()
+    print(f"测试报告：{report_file}")
     print()
     
     return 0

@@ -13,6 +13,10 @@ describe('Automatic Question Generation', () => {
         '{{a_dbname}}': 'DAMENG',
         '{{a_instance}}': 'PROD',
         '{{a_port}}': '5236',
+        '{{db_expected}}': 'DAMENG',
+        '{{instance_expected}}': 'PROD',
+        '{{port_expected}}': '5236',
+        '{{user_expected}}': 'DAMENG',
       });
     });
 
@@ -26,6 +30,10 @@ describe('Automatic Question Generation', () => {
         '{{b_dbname}}': 'DMEXAM',
         '{{b_instance}}': 'TEST',
         '{{b_port}}': '5237',
+        '{{db_expected}}': 'DMEXAM',
+        '{{instance_expected}}': 'TEST',
+        '{{port_expected}}': '5237',
+        '{{user_expected}}': 'DMEXAM',
       });
     });
 
