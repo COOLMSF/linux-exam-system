@@ -249,26 +249,28 @@ export function generateVariableContext(questionSet: string, questionIndex: numb
   // Add additional variables based on question set
   switch (questionSet) {
     case 'a':
-      context['{{a_dbname}}'] = 'DAMENG';
+      context['{{a_dbname}}'] = 'examdb_a';
       context['{{a_instance}}'] = 'PROD';
-      context['{{a_port}}'] = '5236';
+      context['{{a_port}}'] = '3306';
 
       // Generic expected values for scoring script templates
       context['{{db_expected}}'] = context['{{a_dbname}}'];
       context['{{instance_expected}}'] = context['{{a_instance}}'];
       context['{{port_expected}}'] = context['{{a_port}}'];
-      context['{{user_expected}}'] = context['{{a_dbname}}'];
+      context['{{user_expected}}'] = 'exam_dba';
+      context['{{server_id_expected}}'] = '101';
       break;
     case 'b':
-      context['{{b_dbname}}'] = 'DMEXAM';
+      context['{{b_dbname}}'] = 'examdb_b';
       context['{{b_instance}}'] = 'TEST';
-      context['{{b_port}}'] = '5237';
+      context['{{b_port}}'] = '3307';
 
       // Generic expected values for scoring script templates
       context['{{db_expected}}'] = context['{{b_dbname}}'];
       context['{{instance_expected}}'] = context['{{b_instance}}'];
       context['{{port_expected}}'] = context['{{b_port}}'];
-      context['{{user_expected}}'] = context['{{b_dbname}}'];
+      context['{{user_expected}}'] = 'exam_dbb';
+      context['{{server_id_expected}}'] = '102';
       break;
     // Add more cases for additional question sets as needed
   }

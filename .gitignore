@@ -2,6 +2,7 @@
 **/node_modules
 .pnpm-store/
 
+.packaging
 # Build outputs
 dist/
 build/
