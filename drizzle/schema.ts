@@ -32,6 +32,7 @@ export const students = mysqlTable("students", {
   apiToken: varchar("apiToken", { length: 191 }),
   tokenExpiresAt: timestamp("tokenExpiresAt"),
   deviceId: varchar("deviceId", { length: 100 }),
+  passwordHash: varchar("passwordHash", { length: 255 }),
   createdAt: timestamp("createdAt").notNull().defaultNow(),
   updatedAt: timestamp("updatedAt").notNull().defaultNow().onUpdateNow(),
 });

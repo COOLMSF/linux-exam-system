@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { trpc } from "@/lib/trpc";
-import { Plus, Pencil, Trash2, Search, Users, Key, Monitor } from "lucide-react";
+import { Plus, Pencil, Trash2, Search, Users, Key, Monitor, KeyRound, Eye, EyeOff } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -19,12 +19,20 @@ export default function Students() {
   const updateS = trpc.students.update.useMutation({ onSuccess: () => { utils.students.list.invalidate(); toast.success("信息已更新"); setShowForm(false); } });
   const deleteS = trpc.students.delete.useMutation({ onSuccess: () => { utils.students.list.invalidate(); toast.success("学生已删除"); setDeleteId(null); } });
 
+  const setPasswordMutation = trpc.students.setPassword.useMutation({
+    onSuccess: () => { toast.success("密码设置成功"); setPwdTarget(null); setPwdValue(""); },
+    onError: (err) => toast.error(err.message || "设置失败"),
+  });
+
   const [search, setSearch] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [deleteId, setDeleteId] = useState<number | null>(null);
+  const [pwdTarget, setPwdTarget] = useState<{ studentId: string; name: string } | null>(null);
+  const [pwdValue, setPwdValue] = useState("");
+  const [showPwdValue, setShowPwdValue] = useState(false);
   type Student = NonNullable<typeof students>[number];
   const [editing, setEditing] = useState<Student | null>(null);
-  const [form, setForm] = useState({ studentId: "", name: "", className: "", department: "", clientUsername: "" });
+  const [form, setForm] = useState({ studentId: "", name: "", className: "", department: "", clientUsername: "", password: "" });
 
   const filtered = (students ?? []).filter(s =>
     !search || s.name.toLowerCase().includes(search.toLowerCase()) ||
@@ -33,20 +41,24 @@ export default function Students() {
 
   function openCreate() {
     setEditing(null);
-    setForm({ studentId: "", name: "", className: "", department: "", clientUsername: "" });
+    setForm({ studentId: "", name: "", className: "", department: "", clientUsername: "", password: "" });
     setShowForm(true);
   }
 
   function openEdit(s: Student) {
     setEditing(s);
-    setForm({ studentId: s.studentId, name: s.name, className: s.className ?? "", department: s.department ?? "", clientUsername: s.clientUsername ?? "" });
+    setForm({ studentId: s.studentId, name: s.name, className: s.className ?? "", department: s.department ?? "", clientUsername: s.clientUsername ?? "", password: "" });
     setShowForm(true);
   }
 
   function handleSubmit() {
     if (!form.studentId.trim() || !form.name.trim()) { toast.error("请填写学号和姓名"); return; }
-    if (editing) updateS.mutate({ id: editing.id, name: form.name, className: form.className || undefined, department: form.department || undefined, clientUsername: form.clientUsername || undefined });
-    else createS.mutate({ studentId: form.studentId, name: form.name, className: form.className || undefined, department: form.department || undefined, clientUsername: form.clientUsername || undefined });
+    if (editing) {
+      updateS.mutate({ id: editing.id, name: form.name, className: form.className || undefined, department: form.department || undefined, clientUsername: form.clientUsername || undefined });
+    } else {
+      if (!form.password || form.password.length < 6) { toast.error("请设置密码（至少 6 位）"); return; }
+      createS.mutate({ studentId: form.studentId, name: form.name, className: form.className || undefined, department: form.department || undefined, clientUsername: form.clientUsername || undefined, password: form.password });
+    }
   }
 
   return (
@@ -115,6 +127,9 @@ export default function Students() {
                           <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEdit(s)}>
                             <Pencil className="h-3.5 w-3.5" />
                           </Button>
+                          <Button variant="ghost" size="icon" className="h-8 w-8" title="设置密码" onClick={() => { setPwdTarget({ studentId: s.studentId, name: s.name }); setPwdValue(""); setShowPwdValue(false); }}>
+                            <KeyRound className="h-3.5 w-3.5" />
+                          </Button>
                           <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:text-destructive" onClick={() => setDeleteId(s.id)}>
                             <Trash2 className="h-3.5 w-3.5" />
                           </Button>
@@ -154,12 +169,54 @@ export default function Students() {
                 <Label>客户端用户名（预设）</Label>
                 <Input value={form.clientUsername} onChange={e => setForm(f => ({ ...f, clientUsername: e.target.value }))} placeholder="student01（可由客户端自动采集）" />
               </div>
+              {!editing && (
+                <div className="col-span-2 space-y-1.5">
+                  <Label>Web 登录密码 * <span className="text-muted-foreground font-normal">（至少 6 位）</span></Label>
+                  <Input type="password" value={form.password} onChange={e => setForm(f => ({ ...f, password: e.target.value }))} placeholder="设置后学生可登录 Web 端查看成绩" />
+                </div>
+              )}
             </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowForm(false)}>取消</Button>
             <Button onClick={handleSubmit} disabled={createS.isPending || updateS.isPending}>
               {editing ? "保存" : "添加"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Set Password Dialog */}
+      <Dialog open={pwdTarget !== null} onOpenChange={(v) => { if (!v) setPwdTarget(null); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2"><KeyRound className="h-4 w-4" />设置学生密码</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <p className="text-sm text-muted-foreground">为 <span className="font-medium text-foreground">{pwdTarget?.name}</span>（{pwdTarget?.studentId}）设置 Web 登录密码</p>
+            <div className="space-y-1.5">
+              <Label>新密码 <span className="text-muted-foreground font-normal">（至少 6 位）</span></Label>
+              <div className="relative">
+                <Input
+                  type={showPwdValue ? "text" : "password"}
+                  value={pwdValue}
+                  onChange={e => setPwdValue(e.target.value)}
+                  placeholder="请输入密码"
+                  minLength={6}
+                />
+                <button type="button" tabIndex={-1} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground" onClick={() => setShowPwdValue(!showPwdValue)}>
+                  {showPwdValue ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPwdTarget(null)}>取消</Button>
+            <Button
+              disabled={pwdValue.length < 6 || setPasswordMutation.isPending}
+              onClick={() => pwdTarget && setPasswordMutation.mutate({ studentId: pwdTarget.studentId, password: pwdValue })}
+            >
+              {setPasswordMutation.isPending ? "设置中..." : "确认设置"}
             </Button>
           </DialogFooter>
         </DialogContent>

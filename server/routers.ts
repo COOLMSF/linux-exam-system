@@ -51,7 +51,7 @@ import {
 } from "./db";
 import { nanoid } from "nanoid";
 import { examQuestionAssignments } from "../drizzle/schema";
-import { getUserByName, setUserPassword, listAdminUsers } from "./db";
+import { getUserByName, setUserPassword, listAdminUsers, setStudentPassword, getStudentExamRecords } from "./db";
 
 // Import auth utilities from separate file to avoid crypto module issues in client build
 import { makePasswordHash, verifyPassword } from "./utils/auth";
@@ -82,7 +82,15 @@ const studentsRouter = router({
     className: z.string().optional(),
     department: z.string().optional(),
     clientUsername: z.string().optional(),
-  })).mutation(({ input }) => createStudent(input)),
+    password: z.string().min(6),
+  })).mutation(async ({ input }) => {
+    const { password, ...data } = input;
+    const id = await createStudent({
+      ...data,
+      passwordHash: makePasswordHash(password),
+    });
+    return id;
+  }),
   update: adminProcedure.input(z.object({
     id: z.number(),
     name: z.string().optional(),
@@ -94,6 +102,14 @@ const studentsRouter = router({
   delete: adminProcedure.input(z.object({ id: z.number() })).mutation(({ input }) =>
     deleteStudent(input.id)
   ),
+  setPassword: adminProcedure
+    .input(z.object({ studentId: z.string().min(1), password: z.string().min(6) }))
+    .mutation(async ({ input }) => {
+      const student = await getStudentByStudentId(input.studentId);
+      if (!student) throw new TRPCError({ code: 'NOT_FOUND', message: '学生不存在' });
+      await setStudentPassword(input.studentId, makePasswordHash(input.password));
+      return { success: true };
+    }),
 });
 
 // ─── Categories Router ────────────────────────────────────────────────────────
@@ -270,12 +286,20 @@ const clientRouter = router({
   /** Step 1: Agent authenticates with studentId + deviceId, receives token */
   authenticate: publicProcedure.input(z.object({
     studentId: z.string(),
+    password: z.string(),
     deviceId: z.string(),
     clientUsername: z.string(),
   })).mutation(async ({ input }) => {
     const student = await getStudentByStudentId(input.studentId);
     if (!student || !student.isActive) {
       throw new TRPCError({ code: "UNAUTHORIZED", message: "Student not found or inactive" });
+    }
+    // Verify password
+    if (!student.passwordHash) {
+      throw new TRPCError({ code: "UNAUTHORIZED", message: "Account has no password set, contact admin" });
+    }
+    if (!verifyPassword(input.password, student.passwordHash)) {
+      throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid password" });
     }
     // Bind device on first auth; reject mismatched device on subsequent auths
     if (student.deviceId && student.deviceId !== input.deviceId) {
@@ -589,7 +613,111 @@ export const appRouter = router({
         await setUserPassword(user.openId, makePasswordHash(input.newPassword));
         return { success: true };
       }),
+
+    /** Student login — students use studentId + password */
+    studentLogin: publicProcedure
+      .input(z.object({ studentId: z.string().min(1), password: z.string().min(1) }))
+      .mutation(async ({ ctx, input }) => {
+        const student = await getStudentByStudentId(input.studentId);
+        if (!student) throw new TRPCError({ code: 'UNAUTHORIZED', message: '学号或密码错误' });
+        if (!student.isActive) throw new TRPCError({ code: 'FORBIDDEN', message: '该账号已被禁用' });
+        if (!student.passwordHash) throw new TRPCError({ code: 'UNAUTHORIZED', message: '该账号未设置密码，请联系管理员' });
+        if (!verifyPassword(input.password, student.passwordHash)) {
+          throw new TRPCError({ code: 'UNAUTHORIZED', message: '学号或密码错误' });
+        }
+        // Create a user record for the student session (role='student')
+        const openId = 'student-' + student.studentId;
+        await upsertUser({ openId, name: student.name, loginMethod: 'local', role: 'student' });
+        const { sdk } = await import('./_core/sdk');
+        const sessionToken = await sdk.createSessionToken(openId, { name: student.name });
+        const { ONE_YEAR_MS } = await import('@shared/const');
+        const cookieOptions = getSessionCookieOptions(ctx.req);
+        ctx.res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
+        return { success: true, user: { name: student.name, studentId: student.studentId, role: 'student' } };
+      }),
+
+    /** Student change password */
+    studentChangePassword: protectedProcedure
+      .input(z.object({ oldPassword: z.string(), newPassword: z.string().min(6) }))
+      .mutation(async ({ ctx, input }) => {
+        if (!ctx.user?.openId?.startsWith('student-')) {
+          throw new TRPCError({ code: 'FORBIDDEN', message: '仅学生账号可用' });
+        }
+        const sid = ctx.user.openId.replace('student-', '');
+        const student = await getStudentByStudentId(sid);
+        if (!student) throw new TRPCError({ code: 'NOT_FOUND', message: '学生不存在' });
+        if (student.passwordHash && !verifyPassword(input.oldPassword, student.passwordHash)) {
+          throw new TRPCError({ code: 'UNAUTHORIZED', message: '原密码错误' });
+        }
+        await setStudentPassword(student.studentId, makePasswordHash(input.newPassword));
+        return { success: true };
+      }),
   }),
+
+  // ─── Student Portal ──────────────────────────────────────────────────────────
+  studentPortal: router({
+    /** Get current student profile */
+    profile: protectedProcedure.query(async ({ ctx }) => {
+      if (!ctx.user?.openId?.startsWith('student-')) {
+        throw new TRPCError({ code: 'FORBIDDEN', message: '仅学生可访问' });
+      }
+      const sid = ctx.user.openId.replace('student-', '');
+      const student = await getStudentByStudentId(sid);
+      if (!student) throw new TRPCError({ code: 'NOT_FOUND', message: '学生不存在' });
+      return {
+        id: student.id,
+        studentId: student.studentId,
+        name: student.name,
+        className: student.className,
+        department: student.department,
+      };
+    }),
+
+    /** List exams visible to student (active or ended) */
+    exams: protectedProcedure.query(async () => {
+      const all = await listExamSessions();
+      return all.filter(e => e.status === 'active' || e.status === 'ended').map(e => ({
+        id: e.id,
+        name: e.name,
+        description: e.description,
+        status: e.status,
+        durationMinutes: e.durationMinutes,
+        questionCount: e.questionCount,
+        startedAt: e.startedAt,
+        endedAt: e.endedAt,
+      }));
+    }),
+
+    /** My exam records with scores */
+    myRecords: protectedProcedure.query(async ({ ctx }) => {
+      if (!ctx.user?.openId?.startsWith('student-')) {
+        throw new TRPCError({ code: 'FORBIDDEN', message: '仅学生可访问' });
+      }
+      const sid = ctx.user.openId.replace('student-', '');
+      const student = await getStudentByStudentId(sid);
+      if (!student) return [];
+      return getStudentExamRecords(student.id as number);
+    }),
+
+    /** Score details for a specific exam record */
+    scoreDetail: protectedProcedure
+      .input(z.object({ recordId: z.number() }))
+      .query(async ({ ctx, input }) => {
+        if (!ctx.user?.openId?.startsWith('student-')) {
+          throw new TRPCError({ code: 'FORBIDDEN', message: '仅学生可访问' });
+        }
+        const sid = ctx.user.openId.replace('student-', '');
+        const student = await getStudentByStudentId(sid);
+        if (!student) throw new TRPCError({ code: 'NOT_FOUND' });
+        const record = await getExamRecordById(input.recordId);
+        if (!record || record.studentId !== student.id) {
+          throw new TRPCError({ code: 'NOT_FOUND', message: '记录不存在' });
+        }
+        const details = await getScoreDetails(input.recordId);
+        return { record, details };
+      }),
+  }),
+
   students: studentsRouter,
   categories: categoriesRouter,
   questions: questionsRouter,

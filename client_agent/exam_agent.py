@@ -215,12 +215,12 @@ class ExamAPIClient:
             except Exception as e:
                 raise APIError(f"API 调用失败：{e}")
 
-    def authenticate(self, student_id: str, device_id: str, client_username: str) -> Dict[str, Any]:
+    def authenticate(self, student_id: str, password: str, device_id: str, client_username: str) -> Dict[str, Any]:
         """客户端身份认证，获取 Token"""
         logger.info(f"正在认证用户：{student_id}")
         result = self._call(
             "agentApi.authenticate",
-            {"studentId": student_id, "deviceId": device_id, "clientUsername": client_username},
+            {"studentId": student_id, "password": password, "deviceId": device_id, "clientUsername": client_username},
             method="POST"
         )
         token_data = result.get("json", result)
@@ -435,7 +435,7 @@ class ScriptExecutor:
 class ExamController:
     """控制完整考试流程"""
 
-    def __init__(self, server_url: str, auto_mode: bool = True, exam_id: int = 1, student_id: str = ""):
+    def __init__(self, server_url: str, auto_mode: bool = True, exam_id: int = 1, student_id: str = "", password: str = ""):
         self.api = ExamAPIClient(server_url)
         self.executor = ScriptExecutor()
         self.sys_info = get_system_info()
@@ -444,6 +444,7 @@ class ExamController:
         self.auto_mode = auto_mode  # 自动模式：无需确认直接评分
         self.exam_id = exam_id  # 考试 ID
         self.student_id = student_id  # 学生 ID（学号）
+        self.password = password  # 学生密码
 
     def print_banner(self):
         """打印系统横幅"""
@@ -482,10 +483,19 @@ class ExamController:
         if TOKEN_FILE.exists():
             TOKEN_FILE.unlink()
 
+        # 获取密码：优先命令行参数，其次交互输入
+        password = self.password
+        if not password:
+            import getpass
+            password = getpass.getpass(f"[认证] 请输入密码（学号 {student_id}）：")
+            if not password:
+                print("[认证] 密码不能为空")
+                return False
+
         print(f"\n[认证] 正在向服务端认证 ({self.api.server_url})...")
         print(f"  学生 ID：{student_id}")
         try:
-            result = self.api.authenticate(student_id, device_id, username)
+            result = self.api.authenticate(student_id, password, device_id, username)
             resp = result.get("json", result)
             if resp.get("token"):
                 print(f"[认证] 认证成功！欢迎，{resp.get('name', student_id)}")
@@ -816,6 +826,7 @@ def main():
     parser.add_argument("--manual", "-m", action="store_true", help="手动评分模式（需按 Enter 确认）")
     parser.add_argument("--exam-id", "-e", type=int, default=1, help="考试 ID (默认：1)")
     parser.add_argument("--student-id", "-i", type=str, default="", help="学生 ID / 学号 (默认：系统用户名)")
+    parser.add_argument("--password", "-p", type=str, default="", help="学生密码（未指定则交互输入）")
     parser.add_argument("--version", "-v", action="version", version="ExamAgent 1.2")
     args = parser.parse_args()
 
@@ -852,7 +863,8 @@ def main():
     if args.auto:
         auto_mode = True
     student_id = getattr(args, 'student_id', '') or config.get('student_id', '')
-    controller = ExamController(server_url, auto_mode=auto_mode, exam_id=args.exam_id, student_id=student_id)
+    password = getattr(args, 'password', '') or config.get('password', '')
+    controller = ExamController(server_url, auto_mode=auto_mode, exam_id=args.exam_id, student_id=student_id, password=password)
     return controller.run()
 
 

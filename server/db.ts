@@ -137,6 +137,31 @@ export async function deleteStudent(id: number) {
   await db.delete(students).where(eq(students.id, id));
 }
 
+export async function setStudentPassword(studentId: string, passwordHash: string) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(students).set({ passwordHash }).where(eq(students.studentId, studentId));
+}
+
+export async function getStudentExamRecords(studentDbId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select({
+    id: examRecords.id,
+    examId: examRecords.examId,
+    examName: examSessions.name,
+    status: examRecords.status,
+    totalScore: examRecords.totalScore,
+    maxPossibleScore: examRecords.maxPossibleScore,
+    startedAt: examRecords.startedAt,
+    submittedAt: examRecords.submittedAt,
+    gradedAt: examRecords.gradedAt,
+  }).from(examRecords)
+    .leftJoin(examSessions, eq(examRecords.examId, examSessions.id))
+    .where(eq(examRecords.studentId, studentDbId))
+    .orderBy(desc(examRecords.startedAt));
+}
+
 // ─── Question Categories ──────────────────────────────────────────────────────
 
 export async function listCategories() {
