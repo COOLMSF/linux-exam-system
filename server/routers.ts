@@ -699,6 +699,26 @@ export const appRouter = router({
       return getStudentExamRecords(student.id as number);
     }),
 
+    /** My assigned questions for an exam */
+    myQuestions: protectedProcedure
+      .input(z.object({ examId: z.number() }))
+      .query(async ({ ctx, input }) => {
+        if (!ctx.user?.openId?.startsWith('student-')) {
+          throw new TRPCError({ code: 'FORBIDDEN', message: '仅学生可访问' });
+        }
+        const sid = ctx.user.openId.replace('student-', '');
+        const student = await getStudentByStudentId(sid);
+        if (!student) return [];
+        const assignments = await getAssignmentsForStudent(input.examId, student.id as number);
+        return assignments.map(a => ({
+          questionId: a.questionId,
+          title: a.title,
+          content: a.content,
+          maxScore: a.maxScore,
+          sortOrder: a.sortOrder,
+        }));
+      }),
+
     /** Score details for a specific exam record */
     scoreDetail: protectedProcedure
       .input(z.object({ recordId: z.number() }))

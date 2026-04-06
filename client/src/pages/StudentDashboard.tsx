@@ -8,8 +8,9 @@ import { Label } from "@/components/ui/label";
 import { trpc } from "@/lib/trpc";
 import {
   BookOpen, ClipboardList, Eye, EyeOff, GraduationCap, KeyRound, Loader2, LogOut,
-  Trophy, User, Clock, BarChart2, ChevronRight,
+  Trophy, User, Clock, BarChart2, ChevronRight, FileText, Star, CheckCircle2,
 } from "lucide-react";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { useMemo, useState } from "react";
 import { useLocation } from "wouter";
 import { toast } from "sonner";
@@ -33,6 +34,7 @@ export default function StudentDashboard() {
   const [tab, setTab] = useState<"exams" | "records" | "profile">("exams");
   const [showChangePwd, setShowChangePwd] = useState(false);
   const [selectedRecord, setSelectedRecord] = useState<number | null>(null);
+  const [selectedExamId, setSelectedExamId] = useState<number | null>(null);
 
   const { data: profile } = trpc.studentPortal.profile.useQuery(undefined, { retry: false });
   const { data: exams } = trpc.studentPortal.exams.useQuery(undefined, { refetchInterval: 15000 });
@@ -40,6 +42,10 @@ export default function StudentDashboard() {
   const { data: scoreDetail } = trpc.studentPortal.scoreDetail.useQuery(
     { recordId: selectedRecord! },
     { enabled: selectedRecord !== null },
+  );
+  const { data: myQuestions, isLoading: questionsLoading } = trpc.studentPortal.myQuestions.useQuery(
+    { examId: selectedExamId! },
+    { enabled: selectedExamId !== null },
   );
 
   const stats = useMemo(() => {
@@ -174,6 +180,9 @@ export default function StudentDashboard() {
                         <span className="font-mono">ID: {exam.id}</span>
                       </div>
                     </div>
+                    <Button size="sm" variant="outline" className="shrink-0" onClick={() => setSelectedExamId(exam.id)}>
+                      <FileText className="h-3.5 w-3.5 mr-1" />查看题目
+                    </Button>
                   </div>
                 </CardContent>
               </Card>
@@ -283,8 +292,80 @@ export default function StudentDashboard() {
         </DialogContent>
       </Dialog>
 
+      {/* Questions dialog */}
+      <Dialog open={selectedExamId !== null} onOpenChange={(v) => { if (!v) setSelectedExamId(null); }}>
+        <DialogContent className="sm:max-w-2xl max-h-[85vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2"><FileText className="h-4 w-4" />考试题目与评分标准</DialogTitle>
+          </DialogHeader>
+          {questionsLoading ? (
+            <div className="py-12 text-center"><Loader2 className="h-6 w-6 animate-spin mx-auto text-muted-foreground" /></div>
+          ) : !myQuestions?.length ? (
+            <div className="py-12 text-center text-muted-foreground">
+              <FileText className="h-8 w-8 mx-auto mb-2 opacity-30" />
+              <p>暂无已分配的题目</p>
+              <p className="text-xs mt-1">请先通过客户端 Agent 抽取题目</p>
+            </div>
+          ) : (
+            <ScrollArea className="flex-1 -mx-6 px-6">
+              <div className="space-y-4 pb-2">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-muted-foreground">共 {myQuestions.length} 道题目</span>
+                  <span className="font-medium">满分 {myQuestions.reduce((s, q) => s + (q.maxScore ?? 0), 0)} 分</span>
+                </div>
+                {myQuestions.map((q, i) => (
+                  <QuestionCard key={q.questionId} question={q} index={i} />
+                ))}
+              </div>
+            </ScrollArea>
+          )}
+        </DialogContent>
+      </Dialog>
+
       {/* Change password dialog */}
       <ChangePasswordDialog open={showChangePwd} onOpenChange={setShowChangePwd} />
+    </div>
+  );
+}
+
+function QuestionCard({ question, index }: { question: { title?: string | null; content?: string | null; maxScore?: number | null }; index: number }) {
+  const content = question.content ?? "";
+  const lines = content.split("\n");
+  let inScoring = false;
+
+  return (
+    <div className="rounded-lg border bg-white overflow-hidden">
+      <div className="px-4 py-3 bg-muted/30 border-b flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="h-6 w-6 rounded-full bg-primary/10 text-primary text-xs font-bold flex items-center justify-center">{index + 1}</span>
+          <span className="font-medium text-sm">{question.title || `第 ${index + 1} 题`}</span>
+        </div>
+        <Badge variant="secondary" className="text-xs">{question.maxScore ?? 0} 分</Badge>
+      </div>
+      <div className="px-4 py-3 text-sm space-y-0.5">
+        {lines.map((line, li) => {
+          const stripped = line.trim();
+          if (stripped.startsWith("评分标准") || stripped.startsWith("评分规则")) {
+            inScoring = true;
+            return (
+              <div key={li} className="mt-3 mb-1 flex items-center gap-1.5 text-amber-700 font-semibold">
+                <Star className="h-3.5 w-3.5 fill-amber-400 text-amber-400" />{stripped}
+              </div>
+            );
+          }
+          if (inScoring && stripped) {
+            return (
+              <div key={li} className="flex items-start gap-1.5 text-emerald-700 pl-1">
+                <CheckCircle2 className="h-3.5 w-3.5 mt-0.5 shrink-0" /><span>{stripped}</span>
+              </div>
+            );
+          }
+          if (!stripped) {
+            return <div key={li} className="h-2" />;
+          }
+          return <div key={li} className="text-muted-foreground whitespace-pre-wrap">{line}</div>;
+        })}
+      </div>
     </div>
   );
 }

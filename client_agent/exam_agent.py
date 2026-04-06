@@ -435,7 +435,7 @@ class ScriptExecutor:
 class ExamController:
     """控制完整考试流程"""
 
-    def __init__(self, server_url: str, auto_mode: bool = True, exam_id: int = 1, student_id: str = "", password: str = ""):
+    def __init__(self, server_url: str, auto_mode: bool = True, exam_id: int = 1, student_id: str = "", password: str = "", view_only: bool = False):
         self.api = ExamAPIClient(server_url)
         self.executor = ScriptExecutor()
         self.sys_info = get_system_info()
@@ -445,6 +445,7 @@ class ExamController:
         self.exam_id = exam_id  # 考试 ID
         self.student_id = student_id  # 学生 ID（学号）
         self.password = password  # 学生密码
+        self.view_only = view_only  # 仅查看题目模式
 
     def print_banner(self):
         """打印系统横幅"""
@@ -570,22 +571,48 @@ class ExamController:
         print("\n[超时] 等待超时，请联系监考老师")
         return None
 
-    def display_questions(self, questions: List[Dict[str, Any]]) -> None:
-        """在终端显示题目内容"""
-        print("\n" + "=" * 60)
-        print("                    考试题目")
-        print("=" * 60)
+    def display_questions(self, questions: List[Dict[str, Any]], view_only: bool = False) -> None:
+        """在终端显示题目内容，高亮评分标准"""
+        total_max = sum(q.get('maxScore', 0) for q in questions)
+        print("\n" + "═" * 60)
+        print(f"                    考试题目（共 {len(questions)} 题，满分 {total_max} 分）")
+        print("═" * 60)
         for i, q in enumerate(questions, 1):
-            print(f"\n【第 {i} 题】{q.get('title', '')}  ({q.get('maxScore', 0)} 分)")
-            print("-" * 40)
-            print(q.get("content", ""))
-            print()
-        print("=" * 60)
-        
-        if not self.auto_mode:
-            print("[提示] 请在本机完成以上操作，完成后按 Enter 键开始评分")
+            print(f"\n┌─ 第 {i} 题 ─────────────────────────────────────────")
+            print(f"│ {q.get('title', '')}  （{q.get('maxScore', 0)} 分）")
+            print("├" + "─" * 58)
+            content = q.get("content", "")
+            # 分割题目内容和评分标准
+            lines = content.split('\n')
+            in_scoring = False
+            for line in lines:
+                stripped = line.strip()
+                if stripped.startswith('评分标准') or stripped.startswith('评分规则'):
+                    in_scoring = True
+                    print("│")
+                    print("│ ★ " + stripped)
+                elif in_scoring and stripped:
+                    print("│   ✓ " + stripped)
+                elif stripped:
+                    print("│ " + line)
+                else:
+                    print("│")
+            print("└" + "─" * 58)
+        print()
+        print("═" * 60)
+        print(f"  总计：{len(questions)} 道题目，满分 {total_max} 分")
+        print("═" * 60)
+
+        if view_only:
+            print("\n[查看模式] 以上为本次考试的全部题目和评分标准。")
+            print("[提示] 请根据评分标准在本机完成操作，然后重新运行 Agent 进行评分提交。")
+            print("[提示] 评分命令示例：")
+            sid = self.student_id or self.sys_info.get('username', 'your_id')
+            print(f"        exam_agent --exam-id {self.exam_id} --student-id {sid} --password <密码>")
+        elif not self.auto_mode:
+            print("\n[提示] 请在本机完成以上操作，完成后按 Enter 键开始评分")
         else:
-            print("[自动模式] 考试开始即计时，完成后将自动评分并提交")
+            print("\n[自动模式] 考试开始即计时，完成后将自动评分并提交")
 
     def run_scoring(self, questions: List[Dict[str, Any]]) -> Dict[str, Any]:
         """执行评分流程（支持 score.sh 格式：一次性输出全部题目分数）"""
@@ -669,6 +696,11 @@ class ExamController:
         if not questions:
             print("[错误] 未获取到题目，请联系监考老师")
             return 1
+
+        # 仅查看模式：显示题目后退出
+        if self.view_only:
+            self.display_questions(questions, view_only=True)
+            return 0
 
         # Step 4: 开始考试记录
         try:
@@ -816,6 +848,7 @@ def main():
   %(prog)s --manual                 # 手动评分模式（需按 Enter 确认）
   %(prog)s --server http://192.168.1.100:3000  # 指定服务器地址
   %(prog)s --config                 # 进入配置模式
+  %(prog)s --view --exam-id 11       # 查看考试题目和评分标准
   %(prog)s --test-connection        # 测试服务器连接
         """
     )
@@ -827,6 +860,7 @@ def main():
     parser.add_argument("--exam-id", "-e", type=int, default=1, help="考试 ID (默认：1)")
     parser.add_argument("--student-id", "-i", type=str, default="", help="学生 ID / 学号 (默认：系统用户名)")
     parser.add_argument("--password", "-p", type=str, default="", help="学生密码（未指定则交互输入）")
+    parser.add_argument("--view", action="store_true", help="仅查看题目和评分标准，不评分不提交")
     parser.add_argument("--version", "-v", action="version", version="ExamAgent 1.2")
     args = parser.parse_args()
 
@@ -864,7 +898,8 @@ def main():
         auto_mode = True
     student_id = getattr(args, 'student_id', '') or config.get('student_id', '')
     password = getattr(args, 'password', '') or config.get('password', '')
-    controller = ExamController(server_url, auto_mode=auto_mode, exam_id=args.exam_id, student_id=student_id, password=password)
+    view_only = getattr(args, 'view', False)
+    controller = ExamController(server_url, auto_mode=auto_mode, exam_id=args.exam_id, student_id=student_id, password=password, view_only=view_only)
     return controller.run()
 
 
