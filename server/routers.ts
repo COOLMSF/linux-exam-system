@@ -134,6 +134,7 @@ const questionsRouter = router({
     categoryId: z.number().optional(),
     difficulty: z.number().min(1).max(3).default(2),
     maxScore: z.number().min(1).default(10),
+    scoringScript: z.string().optional(),
     sortOrder: z.number().default(0),
   })).mutation(({ input }) => createQuestion(input)),
   update: adminProcedure.input(z.object({
@@ -143,10 +144,47 @@ const questionsRouter = router({
     categoryId: z.number().optional(),
     difficulty: z.number().min(1).max(3).optional(),
     maxScore: z.number().min(1).optional(),
+    scoringScript: z.string().nullable().optional(),
     sortOrder: z.number().optional(),
     isActive: z.boolean().optional(),
   })).mutation(({ input: { id, ...data } }) => updateQuestion(id, data)),
   delete: adminProcedure.input(z.object({ id: z.number() })).mutation(({ input }) => deleteQuestion(input.id)),
+
+  /** Validate a scoring script (bash -n syntax check) */
+  validateScript: adminProcedure.input(z.object({
+    script: z.string().min(1),
+  })).mutation(async ({ input }) => {
+    const { execSync } = await import('child_process');
+    const { writeFileSync, unlinkSync } = await import('fs');
+    const { join } = await import('path');
+    const { tmpdir } = await import('os');
+    const tmpFile = join(tmpdir(), `validate_${Date.now()}.sh`);
+    try {
+      writeFileSync(tmpFile, input.script, 'utf8');
+      execSync(`bash -n "${tmpFile}" 2>&1`, { timeout: 5000 });
+      return { valid: true, message: '语法检查通过' };
+    } catch (err: any) {
+      const output = err.stdout?.toString() || err.stderr?.toString() || err.message || '未知错误';
+      return { valid: false, message: output.replace(tmpFile, 'script.sh') };
+    } finally {
+      try { unlinkSync(tmpFile); } catch {}
+    }
+  }),
+
+  /** List preset scoring scripts from scoring_scripts/ directory */
+  listPresets: adminProcedure.query(async () => {
+    const { readdirSync, readFileSync, existsSync } = await import('fs');
+    const { join } = await import('path');
+    const dir = join(__dirname, '../scoring_scripts');
+    if (!existsSync(dir)) return [];
+    const files = readdirSync(dir).filter(f => f.endsWith('.sh')).sort();
+    return files.map(f => {
+      const content = readFileSync(join(dir, f), 'utf8');
+      // Extract description from first comment line
+      const descMatch = content.match(/^#\s*(.+)/m);
+      return { filename: f, description: descMatch?.[1] ?? f, content };
+    });
+  }),
 });
 
 // ─── Scoring Rules Router ─────────────────────────────────────────────────────
@@ -413,18 +451,25 @@ const clientRouter = router({
     }
 
     const questionSetUsed = assignments[0]?.questionSet ?? "a";
-    const scoringScript = buildScoringScript(
-      questionSetUsed,
-      student.clientUsername ?? "student",
-    );
+    // Build the legacy global script as fallback for questions without their own script
+    let legacyScoringScript: string | null = null;
+    try {
+      legacyScoringScript = buildScoringScript(
+        questionSetUsed,
+        student.clientUsername ?? "student",
+      );
+    } catch { /* no legacy script available */ }
 
     return {
       examName: exam.name,
       durationMinutes: exam.durationMinutes,
       questions: assignments.map(a => ({
         ...a,
-        scoringScript,
+        // Per-question script takes priority; fallback to legacy global script
+        scoringScript: a.scoringScript || legacyScoringScript || null,
       })),
+      // Tell agent whether per-question scoring is available
+      perQuestionScoring: assignments.some(a => !!a.scoringScript),
     };
   }),
 

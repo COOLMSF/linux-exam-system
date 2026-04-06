@@ -60,6 +60,11 @@ for arg in "$@"; do
     --status)      MODE="status"       ;;
     --demo-exam)   MODE="demo-exam"    ;;
     --reset-db)    MODE="reset-db"     ;;
+    --install-mysql)    MODE="install-mysql"    ;;
+    --uninstall-mysql)  MODE="uninstall-mysql"  ;;
+    --install-dameng)   MODE="install-dameng"   ;;
+    --uninstall-dameng) MODE="uninstall-dameng" ;;
+    --e2e-test)         MODE="e2e-test"         ;;
     --package-client) MODE="package-client" ;;
     --package-server) MODE="package-server" ;;
     --package-all)    MODE="package-all" ;;
@@ -85,6 +90,13 @@ for arg in "$@"; do
       echo "测试模式（完整考试流程演示）："
       echo "  --demo-exam        一键测试：导入评分规则 + 创建数据 + 学生答题 + score.sh 评分"
       echo "  --test-score       仅测试 score.sh 评分解析功能"
+      echo "  --e2e-test         端到端全流程：创建题目→学生登录→做题→评分→打分（详细输出）"
+      echo ""
+      echo "数据库安装/卸载（需要 root 权限）："
+      echo "  --install-mysql       一键安装 MySQL 数据库"
+      echo "  --uninstall-mysql     一键卸载 MySQL 数据库"
+      echo "  --install-dameng      一键安装达梦 DM8 数据库"
+      echo "  --uninstall-dameng    一键卸载达梦 DM8 数据库"
       echo ""
       echo "运行模式（不需要 root）："
       echo "  --dev           开发模式启动（直接在当前目录运行，无需安装）"
@@ -112,6 +124,11 @@ for arg in "$@"; do
       echo "  bash install.sh --package-server        # 打包服务端"
       echo "  bash install.sh --package-all           # 打包全部用于分发"
       echo "  bash install.sh --demo-exam             # 演示考试全流程测试（含 score.sh）"
+      echo "  bash install.sh --e2e-test              # 端到端全流程测试（详细输出）"
+      echo "  sudo bash install.sh --install-mysql    # 一键安装 MySQL"
+      echo "  sudo bash install.sh --uninstall-mysql  # 一键卸载 MySQL"
+      echo "  sudo bash install.sh --install-dameng   # 一键安装达梦 DM8"
+      echo "  sudo bash install.sh --uninstall-dameng # 一键卸载达梦 DM8"
       echo "  sudo bash install.sh --reset-db         # 重置管理员密码（保留所有数据）"
       echo "  export MYSQL_ROOT_PASSWORD='your_pass' && bash install.sh  # 指定 MySQL 密码"
       exit 0
@@ -122,7 +139,7 @@ done
 # ─── 权限检查 ─────────────────────────────────────────────────────────────────
 check_root() {
   # 以下模式不需要 root
-  if [[ "$MODE" == "easy-test" || "$MODE" == "test-only" || "$MODE" == "test-score" || "$MODE" == "dev" || "$MODE" == "start" || "$MODE" == "stop" || "$MODE" == "status" || "$MODE" == "reset-db" || "$MODE" == "package-client" || "$MODE" == "package-server" || "$MODE" == "package-all" ]]; then
+  if [[ "$MODE" == "easy-test" || "$MODE" == "test-only" || "$MODE" == "test-score" || "$MODE" == "dev" || "$MODE" == "start" || "$MODE" == "stop" || "$MODE" == "status" || "$MODE" == "reset-db" || "$MODE" == "package-client" || "$MODE" == "package-server" || "$MODE" == "package-all" || "$MODE" == "e2e-test" ]]; then
     return 0
   fi
   if [[ $EUID -ne 0 ]]; then
@@ -1924,6 +1941,726 @@ else
 fi
 }
 
+# ─── 卸载 MySQL ──────────────────────────────────────────────────────────────
+uninstall_mysql() {
+  log_section "卸载 MySQL 数据库"
+
+  echo -e "${YELLOW}${BOLD}⚠  警告：此操作将完全卸载 MySQL 并删除所有数据！${NC}"
+  echo ""
+  read -r -p "  确定要卸载 MySQL 吗？(输入 yes 确认): " confirm
+  if [[ "$confirm" != "yes" ]]; then
+    log_warn "用户取消操作"
+    return 0
+  fi
+
+  log_info "步骤 1/4：停止 MySQL 服务..."
+  systemctl stop mysql 2>/dev/null || systemctl stop mysqld 2>/dev/null || true
+  systemctl disable mysql 2>/dev/null || systemctl disable mysqld 2>/dev/null || true
+  log_ok "MySQL 服务已停止"
+
+  log_info "步骤 2/4：卸载 MySQL 软件包..."
+  case "$PKG_MANAGER" in
+    apt)
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get purge -y mysql-server mysql-client mysql-common mysql-server-core-* mysql-client-core-* 2>>"$LOG_FILE" || true
+      apt-get autoremove -y 2>>"$LOG_FILE" || true
+      ;;
+    dnf)
+      dnf remove -y mysql-server mysql mysql-common 2>>"$LOG_FILE" || true
+      ;;
+    yum)
+      yum remove -y mysql-server mysql mysql-common 2>>"$LOG_FILE" || true
+      ;;
+  esac
+  log_ok "MySQL 软件包已卸载"
+
+  log_info "步骤 3/4：清理数据和配置文件..."
+  rm -rf /var/lib/mysql 2>/dev/null || true
+  rm -rf /var/log/mysql 2>/dev/null || true
+  rm -rf /etc/mysql 2>/dev/null || true
+  rm -f /var/log/mysqld.log 2>/dev/null || true
+  log_ok "MySQL 数据和配置文件已清理"
+
+  log_info "步骤 4/4：清理残留进程..."
+  pkill -9 mysqld 2>/dev/null || true
+  sleep 1
+  if pgrep -x mysqld &>/dev/null; then
+    log_warn "mysqld 进程仍在运行，请手动检查"
+  else
+    log_ok "mysqld 进程已清理"
+  fi
+
+  log_section "MySQL 卸载完成"
+  echo -e "  ${GREEN}✓${NC} 服务已停止"
+  echo -e "  ${GREEN}✓${NC} 软件包已卸载"
+  echo -e "  ${GREEN}✓${NC} 数据文件已删除"
+  echo -e "  ${GREEN}✓${NC} 进程已清理"
+  echo ""
+}
+
+# ─── 安装达梦 DM8 ────────────────────────────────────────────────────────────
+install_dameng() {
+  log_section "安装达梦 DM8 数据库"
+
+  # 检查是否已安装
+  if [ -d "/dm/bin" ] && [ -f "/dm/bin/disql" ]; then
+    log_ok "达梦 DM8 已安装（/dm/bin），跳过安装"
+    return 0
+  fi
+
+  # 检查安装包
+  local DM_ISO=""
+  for f in "$SCRIPT_DIR"/dm8_*.iso "$SCRIPT_DIR"/DMInstall*.iso /opt/dm8_*.iso /tmp/dm8_*.iso; do
+    if [[ -f "$f" ]]; then
+      DM_ISO="$f"
+      break
+    fi
+  done
+
+  if [[ -z "$DM_ISO" ]]; then
+    log_error "未找到达梦安装包（dm8_*.iso）"
+    log_info "请将达梦 ISO 安装包放到以下路径之一："
+    echo "  $SCRIPT_DIR/dm8_*.iso"
+    echo "  /opt/dm8_*.iso"
+    echo "  /tmp/dm8_*.iso"
+    echo ""
+    log_info "下载地址：https://www.dameng.com/list_103.html"
+    exit 1
+  fi
+
+  log_ok "找到达梦安装包: $DM_ISO"
+
+  log_info "步骤 1/6：创建 dmdba 用户..."
+  if id dmdba &>/dev/null; then
+    log_ok "dmdba 用户已存在"
+  else
+    groupadd -f dinstall
+    useradd -g dinstall -m -d /home/dmdba -s /bin/bash dmdba
+    echo "dmdba:Dameng123" | chpasswd
+    log_ok "dmdba 用户创建成功（密码：Dameng123）"
+  fi
+
+  log_info "步骤 2/6：创建安装目录..."
+  mkdir -p /dm /dm/data /dm/arch /dm/backup
+  chown -R dmdba:dinstall /dm
+
+  log_info "步骤 3/6：挂载 ISO 并安装..."
+  local MOUNT_DIR="/mnt/dm_install"
+  mkdir -p "$MOUNT_DIR"
+  mount -o loop "$DM_ISO" "$MOUNT_DIR" 2>/dev/null || {
+    log_error "ISO 挂载失败"
+    exit 1
+  }
+
+  # 静默安装
+  cd "$MOUNT_DIR"
+  local DM_INSTALLER=$(find . -name "DMInstall.bin" -o -name "dm_install.bin" 2>/dev/null | head -1)
+  if [[ -z "$DM_INSTALLER" ]]; then
+    DM_INSTALLER=$(find . -maxdepth 2 -executable -type f 2>/dev/null | head -1)
+  fi
+
+  if [[ -n "$DM_INSTALLER" ]]; then
+    log_info "执行安装程序: $DM_INSTALLER"
+    chmod +x "$DM_INSTALLER"
+    su - dmdba -c "cd $MOUNT_DIR && $DM_INSTALLER -i" 2>>"$LOG_FILE" || {
+      log_warn "静默安装失败，尝试命令行模式..."
+      su - dmdba -c "cd $MOUNT_DIR && $DM_INSTALLER -q" 2>>"$LOG_FILE" || true
+    }
+  else
+    log_error "未在 ISO 中找到安装程序"
+    umount "$MOUNT_DIR" 2>/dev/null || true
+    exit 1
+  fi
+
+  umount "$MOUNT_DIR" 2>/dev/null || true
+  rmdir "$MOUNT_DIR" 2>/dev/null || true
+
+  log_info "步骤 4/6：初始化数据库实例..."
+  if [[ -f "/dm/bin/dminit" ]]; then
+    su - dmdba -c "/dm/bin/dminit PATH=/dm/data DB_NAME=DAMENG INSTANCE_NAME=DMSERVER PORT_NUM=5236 CHARSET=1 LOG_SIZE=256" 2>>"$LOG_FILE"
+    log_ok "数据库实例初始化完成"
+  else
+    log_warn "dminit 不存在，可能安装路径不是 /dm"
+  fi
+
+  log_info "步骤 5/6：注册系统服务..."
+  if [[ -f "/dm/script/root/root_installer.sh" ]]; then
+    bash /dm/script/root/root_installer.sh 2>>"$LOG_FILE" || true
+  fi
+  # 手动创建 systemd 服务
+  if [[ -f "/dm/bin/DmServiceDMSERVER" ]]; then
+    /dm/bin/DmServiceDMSERVER install 2>>"$LOG_FILE" || true
+  fi
+  log_ok "服务注册完成"
+
+  log_info "步骤 6/6：启动达梦服务..."
+  systemctl start DmServiceDMSERVER 2>/dev/null || \
+    su - dmdba -c "/dm/bin/dmserver /dm/data/DAMENG/dm.ini &" 2>/dev/null || true
+
+  sleep 3
+  if pgrep -x dmserver &>/dev/null; then
+    log_ok "达梦数据库服务已启动"
+  else
+    log_warn "达梦服务可能未成功启动，请手动检查"
+  fi
+
+  log_section "达梦 DM8 安装完成"
+  echo -e "  安装路径: ${CYAN}/dm${NC}"
+  echo -e "  数据路径: ${CYAN}/dm/data${NC}"
+  echo -e "  默认端口: ${CYAN}5236${NC}"
+  echo -e "  管理员:   ${CYAN}SYSDBA / Dameng123${NC}"
+  echo -e "  dmdba 密码: ${CYAN}Dameng123${NC}"
+  echo ""
+  echo -e "  连接测试: ${CYAN}/dm/bin/disql SYSDBA/Dameng123@localhost:5236${NC}"
+  echo ""
+}
+
+# ─── 卸载达梦 DM8 ────────────────────────────────────────────────────────────
+uninstall_dameng() {
+  log_section "卸载达梦 DM8 数据库"
+
+  echo -e "${YELLOW}${BOLD}⚠  警告：此操作将完全卸载达梦 DM8 并删除所有数据！${NC}"
+  echo ""
+  read -r -p "  确定要卸载达梦 DM8 吗？(输入 yes 确认): " confirm
+  if [[ "$confirm" != "yes" ]]; then
+    log_warn "用户取消操作"
+    return 0
+  fi
+
+  log_info "步骤 1/4：停止达梦服务..."
+  systemctl stop DmServiceDMSERVER 2>/dev/null || true
+  systemctl disable DmServiceDMSERVER 2>/dev/null || true
+  # 停止所有达梦相关服务
+  for svc in $(systemctl list-units --type=service --all 2>/dev/null | grep -i "DmService" | awk '{print $1}'); do
+    systemctl stop "$svc" 2>/dev/null || true
+    systemctl disable "$svc" 2>/dev/null || true
+  done
+  pkill -9 dmserver 2>/dev/null || true
+  pkill -9 dmap 2>/dev/null || true
+  sleep 1
+  log_ok "达梦服务已停止"
+
+  log_info "步骤 2/4：移除系统服务..."
+  if [[ -f "/dm/bin/DmServiceDMSERVER" ]]; then
+    /dm/bin/DmServiceDMSERVER remove 2>/dev/null || true
+  fi
+  rm -f /etc/systemd/system/DmService*.service 2>/dev/null || true
+  rm -f /usr/lib/systemd/system/DmService*.service 2>/dev/null || true
+  systemctl daemon-reload 2>/dev/null || true
+  log_ok "系统服务已移除"
+
+  log_info "步骤 3/4：删除达梦文件..."
+  rm -rf /dm 2>/dev/null || true
+  rm -rf /home/dmdba/dmdbms 2>/dev/null || true
+  rm -rf /home/dmdba/*.buf 2>/dev/null || true
+  rm -rf /home/dmdba/*.log 2>/dev/null || true
+  log_ok "达梦安装文件已删除"
+
+  log_info "步骤 4/4：清理 dmdba 用户（可选）..."
+  if id dmdba &>/dev/null; then
+    read -r -p "  是否同时删除 dmdba 用户？(y/N): " del_user
+    if [[ "${del_user,,}" == "y" ]]; then
+      userdel -r dmdba 2>/dev/null || userdel dmdba 2>/dev/null || true
+      groupdel dinstall 2>/dev/null || true
+      log_ok "dmdba 用户已删除"
+    else
+      log_info "保留 dmdba 用户"
+    fi
+  fi
+
+  log_section "达梦 DM8 卸载完成"
+  echo -e "  ${GREEN}✓${NC} 服务已停止并移除"
+  echo -e "  ${GREEN}✓${NC} 安装文件已删除"
+  echo -e "  ${GREEN}✓${NC} 进程已清理"
+  echo ""
+}
+
+# ─── 端到端测试（完整流程：创建→登录→做题→评分→打分）───────────────────────
+e2e_test() {
+  # 关闭 strict 模式，e2e 测试函数内部自行管理错误
+  set +e
+  set +o pipefail
+
+  log_section "端到端全流程测试"
+
+  local SERVER_URL="http://localhost:3001"
+  local PROJECT_DIR="$SCRIPT_DIR"
+  local E2E_DIR="/tmp/e2e_exam_test_$$"
+  local PASS=0
+  local FAIL=0
+  local TOTAL_STEPS=8
+
+  echo ""
+  echo "  本测试将执行完整的考试流程："
+  echo "    ① 检查服务状态"
+  echo "    ② 创建测试学生"
+  echo "    ③ 创建 E2E 测试题目（含评分脚本）"
+  echo "    ④ 创建考试场次并启动"
+  echo "    ⑤ 学生认证登录"
+  echo "    ⑥ 模拟学生做题（执行操作）"
+  echo "    ⑦ 运行 Agent 评分"
+  echo "    ⑧ 查看评分结果"
+  echo ""
+
+  # ── 读取数据库连接信息 ──
+  local ENV_FILE="$PROJECT_DIR/.env"
+  if [[ ! -f "$ENV_FILE" ]]; then
+    log_error ".env 文件不存在: $ENV_FILE"
+    exit 1
+  fi
+  local DB_URL
+  DB_URL=$(grep "^DATABASE_URL=" "$ENV_FILE" | cut -d= -f2-)
+  local DB_PASS
+  DB_PASS=$(echo "$DB_URL" | sed -E 's|mysql://[^:]+:([^@]+)@.*|\1|')
+  DB_PASS=$(python3 -c "import urllib.parse; print(urllib.parse.unquote('$DB_PASS'))" 2>/dev/null || printf '%b' "${DB_PASS//%/\\x}")
+  local DB_USER
+  DB_USER=$(echo "$DB_URL" | sed -E 's|mysql://([^:]+):.*|\1|')
+  local DB_HOST
+  DB_HOST=$(echo "$DB_URL" | sed -E 's|mysql://[^@]+@([^:]+):.*|\1|')
+  local DB_PORT
+  DB_PORT=$(echo "$DB_URL" | sed -E 's|mysql://[^@]+@[^:]+:([0-9]+)/.*|\1|')
+  local DB_NAME
+  DB_NAME=$(echo "$DB_URL" | sed -E 's|mysql://[^/]+/(.+)|\1|')
+  local MYSQL_CMD="mysql -u ${DB_USER} -h ${DB_HOST} -P ${DB_PORT} ${DB_NAME} -N -s"
+
+  # 辅助函数
+  e2e_step() {
+    local step_num="$1"
+    local step_name="$2"
+    echo ""
+    echo -e "${BOLD}${CYAN}── 步骤 ${step_num}/${TOTAL_STEPS}：${step_name} ──${NC}"
+  }
+
+  e2e_ok() {
+    echo -e "  ${GREEN}✓${NC} $*"
+    ((PASS++)) || true
+  }
+
+  e2e_fail() {
+    echo -e "  ${RED}✗${NC} $*"
+    ((FAIL++)) || true
+  }
+
+  e2e_info() {
+    echo -e "  ${BLUE}→${NC} $*"
+  }
+
+  # ════════════════════════════════════════════════════════════════
+  # 步骤 1：检查服务
+  # ════════════════════════════════════════════════════════════════
+  e2e_step 1 "检查服务状态"
+
+  # 检测端口（3000 或 3001）
+  if curl -sf --max-time 3 "http://localhost:3001/api/trpc/auth.me?batch=1&input=%7B%7D" -o /dev/null 2>/dev/null; then
+    SERVER_URL="http://localhost:3001"
+    e2e_ok "服务运行在 $SERVER_URL"
+  elif curl -sf --max-time 3 "http://localhost:3000/api/trpc/auth.me?batch=1&input=%7B%7D" -o /dev/null 2>/dev/null; then
+    SERVER_URL="http://localhost:3000"
+    e2e_ok "服务运行在 $SERVER_URL"
+  else
+    e2e_fail "服务未运行，请先启动服务"
+    log_info "提示：bash install.sh --dev 或 sudo systemctl start linux-exam"
+    exit 1
+  fi
+
+  e2e_info "数据库: ${DB_USER}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
+
+  # ════════════════════════════════════════════════════════════════
+  # 步骤 2：创建测试学生
+  # ════════════════════════════════════════════════════════════════
+  e2e_step 2 "创建测试学生"
+
+  local E2E_STUDENT="e2e_tester"
+  local E2E_PASSWORD="Test123456"
+
+  # 生成密码哈希（与服务端逻辑一致：salt:sha256(salt+password+salt)）
+  local SALT
+  SALT=$(python3 -c "import os; print(os.urandom(16).hex())" 2>/dev/null)
+  local HASH
+  HASH=$(python3 -c "import hashlib; print(hashlib.sha256(('${SALT}${E2E_PASSWORD}${SALT}').encode()).hexdigest())" 2>/dev/null)
+  local PW_HASH="${SALT}:${HASH}"
+
+  MYSQL_PWD="$DB_PASS" $MYSQL_CMD -e "
+    INSERT INTO students (studentId, name, className, passwordHash, isActive, createdAt, updatedAt)
+    VALUES ('${E2E_STUDENT}', 'E2E测试学生', 'E2E测试班', '${PW_HASH}', 1, NOW(), NOW())
+    ON DUPLICATE KEY UPDATE name='E2E测试学生', passwordHash='${PW_HASH}', deviceId=NULL, apiToken=NULL, isActive=1;
+  " 2>/dev/null
+
+  if [[ $? -eq 0 ]]; then
+    e2e_ok "学生 ${E2E_STUDENT} 创建/更新成功"
+    e2e_info "学号: ${E2E_STUDENT}  密码: ${E2E_PASSWORD}"
+  else
+    e2e_fail "学生创建失败"
+  fi
+
+  # ════════════════════════════════════════════════════════════════
+  # 步骤 3：创建 E2E 测试题目（含评分脚本）
+  # ════════════════════════════════════════════════════════════════
+  e2e_step 3 "创建 E2E 测试题目（含每题评分脚本）"
+
+  # 确保分类存在
+  MYSQL_PWD="$DB_PASS" $MYSQL_CMD -e "
+    INSERT INTO question_categories (name, description)
+    VALUES ('E2E自动测试', '端到端自动化测试题目')
+    ON DUPLICATE KEY UPDATE description='端到端自动化测试题目';
+  " 2>/dev/null
+  local CAT_ID
+  CAT_ID=$(MYSQL_PWD="$DB_PASS" $MYSQL_CMD -e "SELECT id FROM question_categories WHERE name='E2E自动测试'" 2>/dev/null)
+  e2e_info "题目分类 ID: ${CAT_ID}"
+
+  # 清理旧 E2E 题目
+  MYSQL_PWD="$DB_PASS" $MYSQL_CMD -e "DELETE FROM questions WHERE title LIKE '[E2E-Auto]%';" 2>/dev/null
+
+  # 题目 1：创建工作目录和文件
+  local SCRIPT1='#!/bin/bash
+# E2E测试：检查工作目录和文件
+SCORE=30
+DIR="/tmp/e2e_exam_test"
+if [ ! -d "$DIR" ]; then
+  echo "✗ 工作目录 $DIR 不存在 (-10)"; SCORE=$((SCORE-10))
+else
+  echo "✓ 工作目录存在 (+10)"
+fi
+if [ ! -f "$DIR/answer.txt" ]; then
+  echo "✗ answer.txt 不存在 (-10)"; SCORE=$((SCORE-10))
+else
+  echo "✓ answer.txt 存在 (+10)"
+  if head -1 "$DIR/answer.txt" 2>/dev/null | grep -q "EXAM_READY"; then
+    echo "✓ 文件内容正确 (+10)"
+  else
+    echo "✗ 文件首行不含 EXAM_READY (-10)"; SCORE=$((SCORE-10))
+  fi
+fi
+echo "SCORE:$SCORE"'
+
+  MYSQL_PWD="$DB_PASS" $MYSQL_CMD -e "
+    INSERT INTO questions (title, content, categoryId, difficulty, maxScore, isActive, sortOrder, scoringScript)
+    VALUES (
+      '[E2E-Auto]创建工作目录',
+      '在 /tmp/e2e_exam_test/ 目录下创建文件 answer.txt，内容首行必须包含 EXAM_READY。',
+      ${CAT_ID}, 1, 30, 1, 1,
+      '$(echo "$SCRIPT1" | sed "s/'/\\\\'/g")'
+    );
+  " 2>/dev/null
+  local Q1_ID
+  Q1_ID=$(MYSQL_PWD="$DB_PASS" $MYSQL_CMD -e "SELECT id FROM questions WHERE title='[E2E-Auto]创建工作目录' LIMIT 1" 2>/dev/null)
+  e2e_ok "题目1: [E2E-Auto]创建工作目录 (ID:${Q1_ID}, 30分)"
+
+  # 题目 2：创建可执行脚本
+  local SCRIPT2='#!/bin/bash
+# E2E测试：检查脚本文件和权限
+SCORE=30
+DIR="/tmp/e2e_exam_test/scripts"
+if [ ! -d "$DIR" ]; then
+  echo "✗ scripts 目录不存在 (-10)"; SCORE=$((SCORE-10))
+else
+  echo "✓ scripts 目录存在 (+10)"
+fi
+if [ ! -f "$DIR/run.sh" ]; then
+  echo "✗ run.sh 不存在 (-10)"; SCORE=$((SCORE-10))
+else
+  echo "✓ run.sh 存在 (+10)"
+  if [ -x "$DIR/run.sh" ]; then
+    echo "✓ run.sh 有执行权限 (+10)"
+  else
+    echo "✗ run.sh 无执行权限 (-10)"; SCORE=$((SCORE-10))
+  fi
+fi
+echo "SCORE:$SCORE"'
+
+  MYSQL_PWD="$DB_PASS" $MYSQL_CMD -e "
+    INSERT INTO questions (title, content, categoryId, difficulty, maxScore, isActive, sortOrder, scoringScript)
+    VALUES (
+      '[E2E-Auto]创建可执行脚本',
+      '在 /tmp/e2e_exam_test/scripts/ 下创建 run.sh，内容为 #!/bin/bash，并赋予执行权限。',
+      ${CAT_ID}, 1, 30, 1, 2,
+      '$(echo "$SCRIPT2" | sed "s/'/\\\\'/g")'
+    );
+  " 2>/dev/null
+  local Q2_ID
+  Q2_ID=$(MYSQL_PWD="$DB_PASS" $MYSQL_CMD -e "SELECT id FROM questions WHERE title='[E2E-Auto]创建可执行脚本' LIMIT 1" 2>/dev/null)
+  e2e_ok "题目2: [E2E-Auto]创建可执行脚本 (ID:${Q2_ID}, 30分)"
+
+  # 题目 3：创建数据文件
+  local SCRIPT3='#!/bin/bash
+# E2E测试：检查数据文件
+SCORE=40
+DIR="/tmp/e2e_exam_test/data"
+if [ ! -d "$DIR" ]; then
+  echo "✗ data 目录不存在 (-15)"; SCORE=$((SCORE-15))
+else
+  echo "✓ data 目录存在 (+15)"
+fi
+if [ ! -f "$DIR/report.csv" ]; then
+  echo "✗ report.csv 不存在 (-15)"; SCORE=$((SCORE-15))
+else
+  echo "✓ report.csv 存在 (+15)"
+  LINES=$(wc -l < "$DIR/report.csv" 2>/dev/null || echo 0)
+  if [ "$LINES" -ge 3 ]; then
+    echo "✓ report.csv 有 ${LINES} 行 (>=3) (+10)"
+  else
+    echo "✗ report.csv 行数不足 (${LINES}<3) (-10)"; SCORE=$((SCORE-10))
+  fi
+fi
+echo "SCORE:$SCORE"'
+
+  MYSQL_PWD="$DB_PASS" $MYSQL_CMD -e "
+    INSERT INTO questions (title, content, categoryId, difficulty, maxScore, isActive, sortOrder, scoringScript)
+    VALUES (
+      '[E2E-Auto]创建数据文件',
+      '在 /tmp/e2e_exam_test/data/ 下创建 report.csv，至少包含 3 行数据。',
+      ${CAT_ID}, 1, 40, 1, 3,
+      '$(echo "$SCRIPT3" | sed "s/'/\\\\'/g")'
+    );
+  " 2>/dev/null
+  local Q3_ID
+  Q3_ID=$(MYSQL_PWD="$DB_PASS" $MYSQL_CMD -e "SELECT id FROM questions WHERE title='[E2E-Auto]创建数据文件' LIMIT 1" 2>/dev/null)
+  e2e_ok "题目3: [E2E-Auto]创建数据文件 (ID:${Q3_ID}, 40分)"
+
+  e2e_info "共 3 道题，满分 100 分"
+
+  # ════════════════════════════════════════════════════════════════
+  # 步骤 4：创建考试场次
+  # ════════════════════════════════════════════════════════════════
+  e2e_step 4 "创建考试场次并启动"
+
+  # 清理旧 E2E 考试
+  local OLD_EXAM_ID
+  OLD_EXAM_ID=$(MYSQL_PWD="$DB_PASS" $MYSQL_CMD -e "SELECT id FROM exam_sessions WHERE name='E2E自动化测试考试' LIMIT 1" 2>/dev/null)
+  if [[ -n "$OLD_EXAM_ID" ]]; then
+    MYSQL_PWD="$DB_PASS" $MYSQL_CMD -e "
+      DELETE FROM score_details WHERE examRecordId IN (SELECT id FROM exam_records WHERE examId=${OLD_EXAM_ID});
+      DELETE FROM exam_records WHERE examId=${OLD_EXAM_ID};
+      DELETE FROM exam_question_assignments WHERE examId=${OLD_EXAM_ID};
+      DELETE FROM exam_sessions WHERE id=${OLD_EXAM_ID};
+    " 2>/dev/null
+    e2e_info "已清理旧考试数据 (ID:${OLD_EXAM_ID})"
+  fi
+
+  MYSQL_PWD="$DB_PASS" $MYSQL_CMD -e "
+    INSERT INTO exam_sessions (name, description, durationMinutes, questionCount, status, categoryFilter, createdAt, startedAt)
+    VALUES (
+      'E2E自动化测试考试',
+      '端到端自动化测试 - $(date +%Y%m%d_%H%M%S)',
+      60, 3, 'active',
+      '[${CAT_ID}]',
+      NOW(), NOW()
+    );
+  " 2>/dev/null
+  local EXAM_ID
+  EXAM_ID=$(MYSQL_PWD="$DB_PASS" $MYSQL_CMD -e "SELECT id FROM exam_sessions WHERE name='E2E自动化测试考试' ORDER BY id DESC LIMIT 1" 2>/dev/null)
+
+  if [[ -n "$EXAM_ID" ]]; then
+    e2e_ok "考试场次创建成功 (ID:${EXAM_ID})"
+    e2e_info "状态: active | 时长: 60分钟 | 题数: 3"
+  else
+    e2e_fail "考试场次创建失败"
+    return 1
+  fi
+
+  # ════════════════════════════════════════════════════════════════
+  # 步骤 5：验证学生账号可用
+  # ════════════════════════════════════════════════════════════════
+  e2e_step 5 "验证学生账号可用"
+
+  # 不用 curl 做认证（会绑定 deviceId 导致后续 Agent 冲突），只验证 DB 中学生数据正确
+  local STU_CHECK
+  STU_CHECK=$(MYSQL_PWD="$DB_PASS" $MYSQL_CMD -e "
+    SELECT studentId, name, (passwordHash IS NOT NULL) as hasPwd, deviceId
+    FROM students WHERE studentId='${E2E_STUDENT}' AND isActive=1;
+  " 2>/dev/null)
+
+  if [[ -n "$STU_CHECK" ]]; then
+    e2e_ok "学生账号验证通过"
+    e2e_info "学号: ${E2E_STUDENT} | 密码已设置 | deviceId 已清空（允许 Agent 绑定）"
+  else
+    e2e_fail "学生账号不可用"
+    return 1
+  fi
+
+  # 确保 API 可达
+  if curl -sf --max-time 3 "${SERVER_URL}/api/trpc/auth.me?batch=1&input=%7B%7D" -o /dev/null 2>/dev/null; then
+    e2e_ok "API 端点可达: ${SERVER_URL}"
+  else
+    e2e_fail "API 端点不可达"
+    return 1
+  fi
+
+  # ════════════════════════════════════════════════════════════════
+  # 步骤 6：模拟学生做题
+  # ════════════════════════════════════════════════════════════════
+  e2e_step 6 "模拟学生做题（执行操作）"
+
+  e2e_info "正在执行学生操作..."
+
+  # 清理旧目录
+  rm -rf /tmp/e2e_exam_test 2>/dev/null
+
+  # 题目1操作：创建目录和文件
+  mkdir -p /tmp/e2e_exam_test
+  echo "EXAM_READY" > /tmp/e2e_exam_test/answer.txt
+  echo "  📝 题目1: mkdir -p /tmp/e2e_exam_test && echo EXAM_READY > answer.txt"
+  e2e_ok "题目1 操作完成：目录和文件已创建"
+
+  # 题目2操作：创建脚本
+  mkdir -p /tmp/e2e_exam_test/scripts
+  echo '#!/bin/bash' > /tmp/e2e_exam_test/scripts/run.sh
+  echo 'echo "Hello from E2E test"' >> /tmp/e2e_exam_test/scripts/run.sh
+  chmod +x /tmp/e2e_exam_test/scripts/run.sh
+  echo "  📝 题目2: echo '#!/bin/bash' > scripts/run.sh && chmod +x scripts/run.sh"
+  e2e_ok "题目2 操作完成：脚本已创建并赋权"
+
+  # 题目3操作：创建数据文件
+  mkdir -p /tmp/e2e_exam_test/data
+  cat > /tmp/e2e_exam_test/data/report.csv <<'CSV'
+id,name,score
+1,Alice,95
+2,Bob,87
+3,Charlie,92
+CSV
+  echo "  📝 题目3: 创建 data/report.csv (4行)"
+  e2e_ok "题目3 操作完成：CSV 数据文件已创建"
+
+  echo ""
+  echo "  📂 操作结果："
+  find /tmp/e2e_exam_test -type f | while read -r f; do
+    echo "    $f  ($(wc -c < "$f") bytes)"
+  done
+
+  # ════════════════════════════════════════════════════════════════
+  # 步骤 7：运行 Agent 评分
+  # ════════════════════════════════════════════════════════════════
+  e2e_step 7 "运行 Agent 自动评分"
+
+  e2e_info "调用 exam_agent.py --auto 模式..."
+
+  # 清除旧的 Agent Token 缓存，确保使用 e2e_tester 重新认证
+  rm -f ~/.exam_agent/token.json 2>/dev/null || true
+  e2e_info "已清除 Agent Token 缓存"
+
+  echo -e "${BOLD}───────── Agent 输出开始 ─────────${NC}"
+
+  local AGENT_OUTPUT
+  AGENT_OUTPUT=$(cd "$PROJECT_DIR" && python3 client_agent/exam_agent.py \
+    --student-id "$E2E_STUDENT" \
+    --password "$E2E_PASSWORD" \
+    --server "$SERVER_URL" \
+    --exam-id "$EXAM_ID" \
+    --auto 2>&1)
+  local AGENT_EXIT=$?
+
+  echo "$AGENT_OUTPUT"
+  echo -e "${BOLD}───────── Agent 输出结束 ─────────${NC}"
+
+  if [[ $AGENT_EXIT -eq 0 ]]; then
+    e2e_ok "Agent 执行成功 (exit code: 0)"
+  else
+    e2e_fail "Agent 执行失败 (exit code: $AGENT_EXIT)"
+  fi
+
+  # 提取总分
+  local TOTAL_SCORE
+  TOTAL_SCORE=$(echo "$AGENT_OUTPUT" | grep -oP '最终得分：\K[0-9]+' | head -1)
+  if [[ -z "$TOTAL_SCORE" ]]; then
+    TOTAL_SCORE=$(echo "$AGENT_OUTPUT" | grep -oP '总分：\K[0-9]+' | head -1)
+  fi
+  e2e_info "Agent 上报总分: ${TOTAL_SCORE:-未知}"
+
+  # ════════════════════════════════════════════════════════════════
+  # 步骤 8：查看评分结果
+  # ════════════════════════════════════════════════════════════════
+  e2e_step 8 "查看评分结果"
+
+  # 从数据库查询结果（按 examId 查找，因为 agent 可能注册了不同的 student 映射）
+  local RECORD
+  RECORD=$(MYSQL_PWD="$DB_PASS" $MYSQL_CMD -e "
+    SELECT er.id, er.totalScore, er.maxPossibleScore, er.status, er.submittedAt
+    FROM exam_records er
+    WHERE er.examId = ${EXAM_ID}
+    ORDER BY er.id DESC LIMIT 1;
+  " 2>/dev/null)
+
+  if [[ -n "$RECORD" ]]; then
+    local REC_ID=$(echo "$RECORD" | awk '{print $1}')
+    local REC_SCORE=$(echo "$RECORD" | awk '{print $2}')
+    local REC_MAX=$(echo "$RECORD" | awk '{print $3}')
+    local REC_STATUS=$(echo "$RECORD" | awk '{print $4}')
+    local REC_TIME=$(echo "$RECORD" | awk '{print $5, $6}')
+
+    e2e_ok "考试记录已保存到数据库"
+    echo ""
+    echo -e "  ${BOLD}╔══════════════════════════════════════════════╗${NC}"
+    echo -e "  ${BOLD}║           E2E 端到端测试评分报告              ║${NC}"
+    echo -e "  ${BOLD}╠══════════════════════════════════════════════╣${NC}"
+    echo -e "  ${BOLD}║${NC}  考试 ID:   ${EXAM_ID}"
+    echo -e "  ${BOLD}║${NC}  学生:      ${E2E_STUDENT}"
+    echo -e "  ${BOLD}║${NC}  记录 ID:   ${REC_ID}"
+    echo -e "  ${BOLD}║${NC}  状态:      ${REC_STATUS}"
+    echo -e "  ${BOLD}║${NC}  提交时间:  ${REC_TIME}"
+    echo -e "  ${BOLD}║${NC}"
+
+    # 查询每题得分
+    local DETAILS
+    DETAILS=$(MYSQL_PWD="$DB_PASS" $MYSQL_CMD -e "
+      SELECT q.title, sd.earnedScore, sd.maxScore
+      FROM score_details sd
+      JOIN questions q ON q.id = sd.questionId
+      WHERE sd.examRecordId = ${REC_ID}
+      ORDER BY q.sortOrder;
+    " 2>/dev/null)
+
+    if [[ -n "$DETAILS" ]]; then
+      echo -e "  ${BOLD}║${NC}  ── 每题得分 ──"
+      echo "$DETAILS" | while IFS=$'\t' read -r title earned max; do
+        local pct=0
+        if [[ "$max" -gt 0 ]]; then
+          pct=$((earned * 100 / max))
+        fi
+        local color="$RED"
+        [[ "$pct" -ge 60 ]] && color="$YELLOW"
+        [[ "$pct" -ge 100 ]] && color="$GREEN"
+        printf "  ${BOLD}║${NC}    %-30s ${color}%3d${NC}/%d 分\n" "$title" "$earned" "$max"
+      done
+    fi
+
+    echo -e "  ${BOLD}║${NC}"
+    if [[ "$REC_SCORE" -ge "$REC_MAX" ]]; then
+      echo -e "  ${BOLD}║${NC}  ${GREEN}${BOLD}总分: ${REC_SCORE} / ${REC_MAX}  ★ 满分通过！${NC}"
+    elif [[ "$REC_SCORE" -ge $((REC_MAX * 60 / 100)) ]]; then
+      echo -e "  ${BOLD}║${NC}  ${YELLOW}${BOLD}总分: ${REC_SCORE} / ${REC_MAX}${NC}"
+    else
+      echo -e "  ${BOLD}║${NC}  ${RED}${BOLD}总分: ${REC_SCORE} / ${REC_MAX}${NC}"
+    fi
+    echo -e "  ${BOLD}╚══════════════════════════════════════════════╝${NC}"
+  else
+    e2e_fail "数据库中未找到考试记录"
+  fi
+
+  # ════════════════════════════════════════════════════════════════
+  # 汇总
+  # ════════════════════════════════════════════════════════════════
+  echo ""
+  log_section "E2E 测试结果汇总"
+
+  local EXPECTED_SCORE=100
+  echo -e "  通过检查点: ${GREEN}${PASS}${NC}"
+  echo -e "  失败检查点: ${RED}${FAIL}${NC}"
+  echo ""
+
+  if [[ "$FAIL" -eq 0 ]] && [[ "${REC_SCORE:-0}" -eq "$EXPECTED_SCORE" ]]; then
+    echo -e "  ${GREEN}${BOLD}★ E2E 端到端测试全部通过！满分 ${EXPECTED_SCORE} 分！${NC}"
+    echo -e "  ${GREEN}  系统功能完整：创建题目 → 学生登录 → 做题 → 逐题评分 → 成绩入库${NC}"
+  elif [[ "$FAIL" -eq 0 ]]; then
+    echo -e "  ${YELLOW}${BOLD}△ E2E 测试流程通过，但得分 ${REC_SCORE:-0}/${EXPECTED_SCORE}（未满分）${NC}"
+  else
+    echo -e "  ${RED}${BOLD}✗ E2E 测试存在失败项，请检查上方输出${NC}"
+  fi
+  echo ""
+
+  # 清理
+  rm -rf /tmp/e2e_exam_test 2>/dev/null || true
+}
+
 # ─── 主流程 ───────────────────────────────────────────────────────────────────
 main() {
   # 初始化日志
@@ -2013,6 +2750,21 @@ main() {
       ;;
     reset-db)
       reset_database
+      ;;
+    install-mysql)
+      install_mysql
+      ;;
+    uninstall-mysql)
+      uninstall_mysql
+      ;;
+    install-dameng)
+      install_dameng
+      ;;
+    uninstall-dameng)
+      uninstall_dameng
+      ;;
+    e2e-test)
+      e2e_test
       ;;
     package-client)
       package_client

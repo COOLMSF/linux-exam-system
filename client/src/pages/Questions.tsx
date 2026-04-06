@@ -10,7 +10,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { trpc } from "@/lib/trpc";
-import { Plus, Pencil, Trash2, Search, BookOpen, Tag, Info } from "lucide-react";
+import { Plus, Pencil, Trash2, Search, BookOpen, Tag, Info, Code2, CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp, FileCode, Sparkles } from "lucide-react";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -29,6 +30,7 @@ export default function Questions() {
   const updateQ = trpc.questions.update.useMutation({ onSuccess: () => { utils.questions.list.invalidate(); toast.success("题目已更新"); setShowForm(false); } });
   const deleteQ = trpc.questions.delete.useMutation({ onSuccess: () => { utils.questions.list.invalidate(); toast.success("题目已删除"); setDeleteId(null); } });
   const createCat = trpc.categories.create.useMutation({ onSuccess: () => { utils.categories.list.invalidate(); toast.success("分类已创建"); setShowCatForm(false); } });
+  const validateScript = trpc.questions.validateScript.useMutation();
 
   const [search, setSearch] = useState("");
   const [filterCat, setFilterCat] = useState<string>("all");
@@ -37,8 +39,11 @@ export default function Questions() {
   const [deleteId, setDeleteId] = useState<number | null>(null);
   type Question = NonNullable<typeof questions>[number];
   const [editing, setEditing] = useState<Question | null>(null);
-  const [form, setForm] = useState({ title: "", content: "", categoryId: "", difficulty: "2", maxScore: "10", sortOrder: "0" });
+  const [form, setForm] = useState({ title: "", content: "", categoryId: "", difficulty: "2", maxScore: "10", sortOrder: "0", scoringScript: "" });
   const [catForm, setCatForm] = useState({ name: "", description: "" });
+  const [scriptOpen, setScriptOpen] = useState(false);
+  const [scriptValidation, setScriptValidation] = useState<{ valid: boolean; message: string } | null>(null);
+  const { data: presets } = trpc.questions.listPresets.useQuery(undefined, { enabled: showForm });
 
   const filtered = (questions ?? []).filter(q => {
     const matchSearch = !search || q.title.toLowerCase().includes(search.toLowerCase());
@@ -48,21 +53,40 @@ export default function Questions() {
 
   function openCreate() {
     setEditing(null);
-    setForm({ title: "", content: "", categoryId: "", difficulty: "2", maxScore: "10", sortOrder: "0" });
+    setForm({ title: "", content: "", categoryId: "", difficulty: "2", maxScore: "10", sortOrder: "0", scoringScript: "" });
+    setScriptOpen(false);
+    setScriptValidation(null);
     setShowForm(true);
   }
 
   function openEdit(q: NonNullable<typeof questions>[number]) {
     setEditing(q);
-    setForm({ title: q.title, content: q.content, categoryId: String(q.categoryId ?? ""), difficulty: String(q.difficulty), maxScore: String(q.maxScore), sortOrder: String(q.sortOrder) });
+    setForm({ title: q.title, content: q.content, categoryId: String(q.categoryId ?? ""), difficulty: String(q.difficulty), maxScore: String(q.maxScore), sortOrder: String(q.sortOrder), scoringScript: q.scoringScript ?? "" });
+    setScriptOpen(!!q.scoringScript);
+    setScriptValidation(null);
     setShowForm(true);
   }
 
   function handleSubmit() {
     if (!form.title.trim() || !form.content.trim()) { toast.error("请填写题目标题和内容"); return; }
-    const payload = { title: form.title, content: form.content, categoryId: form.categoryId ? Number(form.categoryId) : undefined, difficulty: Number(form.difficulty), maxScore: Number(form.maxScore), sortOrder: Number(form.sortOrder) };
-    if (editing) updateQ.mutate({ id: editing.id, ...payload });
-    else createQ.mutate(payload);
+    const payload = {
+      title: form.title, content: form.content,
+      categoryId: form.categoryId ? Number(form.categoryId) : undefined,
+      difficulty: Number(form.difficulty), maxScore: Number(form.maxScore),
+      sortOrder: Number(form.sortOrder),
+      scoringScript: form.scoringScript.trim() || (editing ? null : undefined),
+    };
+    if (editing) updateQ.mutate({ id: editing.id, ...payload } as any);
+    else createQ.mutate(payload as any);
+  }
+
+  function handleValidate() {
+    if (!form.scoringScript.trim()) { toast.error("请先编写评分脚本"); return; }
+    setScriptValidation(null);
+    validateScript.mutate({ script: form.scoringScript }, {
+      onSuccess: (res) => setScriptValidation(res),
+      onError: (err) => setScriptValidation({ valid: false, message: err.message }),
+    });
   }
 
   return (
@@ -111,15 +135,16 @@ export default function Questions() {
                     <th className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">分类</th>
                     <th className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">难度</th>
                     <th className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">分值</th>
+                    <th className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">评分脚本</th>
                     <th className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">状态</th>
                     <th className="text-right px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">操作</th>
                   </tr>
                 </thead>
                 <tbody>
                   {isLoading ? (
-                    <tr><td colSpan={6} className="text-center py-12 text-muted-foreground">加载中...</td></tr>
+                    <tr><td colSpan={7} className="text-center py-12 text-muted-foreground">加载中...</td></tr>
                   ) : filtered.length === 0 ? (
-                    <tr><td colSpan={6} className="text-center py-12 text-muted-foreground">
+                    <tr><td colSpan={7} className="text-center py-12 text-muted-foreground">
                       <BookOpen className="h-8 w-8 mx-auto mb-2 opacity-30" />
                       暂无题目
                     </td></tr>
@@ -139,6 +164,15 @@ export default function Questions() {
                       </td>
                       <td className="px-4 py-3">
                         <span className="font-semibold text-sm">{q.maxScore} 分</span>
+                      </td>
+                      <td className="px-4 py-3">
+                        {q.scoringScript ? (
+                          <Badge variant="outline" className="text-emerald-600 border-emerald-200 bg-emerald-50">
+                            <Code2 className="h-3 w-3 mr-1" />已配置
+                          </Badge>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">未配置</span>
+                        )}
                       </td>
                       <td className="px-4 py-3">
                         <Badge variant={q.isActive ? "default" : "secondary"}>
@@ -213,6 +247,85 @@ export default function Questions() {
                 <Textarea value={form.content} onChange={e => setForm(f => ({ ...f, content: e.target.value }))}
                   placeholder={"请在用户 {{username}} 的机器上完成以下操作：\n1. 卸载现有的达梦数据库软件\n2. ..."}
                   className="min-h-32 font-mono text-sm" />
+              </div>
+
+              {/* Scoring Script Section */}
+              <div className="col-span-2">
+                <Collapsible open={scriptOpen} onOpenChange={setScriptOpen}>
+                  <CollapsibleTrigger asChild>
+                    <Button variant="outline" className="w-full justify-between" type="button">
+                      <span className="flex items-center gap-2">
+                        <Code2 className="h-4 w-4" />
+                        评分脚本
+                        {form.scoringScript.trim() && (
+                          <Badge variant="secondary" className="text-xs">已编写</Badge>
+                        )}
+                      </span>
+                      {scriptOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                    </Button>
+                  </CollapsibleTrigger>
+                  <CollapsibleContent className="mt-3 space-y-3">
+                    <div className="p-3 bg-amber-50 dark:bg-amber-900/20 rounded-lg flex gap-2 text-sm text-amber-700 dark:text-amber-300">
+                      <Sparkles className="h-4 w-4 shrink-0 mt-0.5" />
+                      <div>
+                        <p>每道题可单独配置评分脚本（Bash），Agent 会逐题执行并解析分数。</p>
+                        <p className="mt-1">脚本最后一行须输出 <code className="bg-amber-100 dark:bg-amber-800 px-1 rounded">SCORE:分数</code>，例如 <code className="bg-amber-100 dark:bg-amber-800 px-1 rounded">SCORE:8</code></p>
+                      </div>
+                    </div>
+
+                    {/* Preset selector */}
+                    {presets && presets.length > 0 && (
+                      <div className="space-y-1.5">
+                        <Label className="text-xs text-muted-foreground">从预设脚本库选择</Label>
+                        <Select onValueChange={v => {
+                          const p = presets.find(x => x.filename === v);
+                          if (p) { setForm(f => ({ ...f, scoringScript: p.content })); setScriptValidation(null); }
+                        }}>
+                          <SelectTrigger><SelectValue placeholder="选择预设脚本..." /></SelectTrigger>
+                          <SelectContent>
+                            {presets.map(p => (
+                              <SelectItem key={p.filename} value={p.filename}>
+                                <span className="flex items-center gap-2">
+                                  <FileCode className="h-3.5 w-3.5" />{p.description}
+                                </span>
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    )}
+
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <Label>脚本内容 (Bash)</Label>
+                        <div className="flex items-center gap-2">
+                          {scriptValidation && (
+                            <span className={`text-xs flex items-center gap-1 ${scriptValidation.valid ? 'text-emerald-600' : 'text-red-500'}`}>
+                              {scriptValidation.valid ? <CheckCircle2 className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}
+                              {scriptValidation.message}
+                            </span>
+                          )}
+                          <Button type="button" variant="outline" size="sm" onClick={handleValidate} disabled={validateScript.isPending}>
+                            {validateScript.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" /> : <CheckCircle2 className="h-3.5 w-3.5 mr-1" />}
+                            语法检查
+                          </Button>
+                        </div>
+                      </div>
+                      <Textarea
+                        value={form.scoringScript}
+                        onChange={e => { setForm(f => ({ ...f, scoringScript: e.target.value })); setScriptValidation(null); }}
+                        placeholder={`#!/bin/bash\n# 评分脚本 - 本题满分 10 分\nSCORE=10\n\n# 检查条件1\nif ! systemctl is-active mysql &>/dev/null; then\n  echo "✓ MySQL 服务已停止"\nelse\n  echo "✗ MySQL 服务仍在运行"\n  SCORE=$((SCORE - 3))\nfi\n\n# 输出最终得分（必须）\necho "SCORE:$SCORE"`}
+                        className="min-h-48 font-mono text-xs leading-relaxed"
+                      />
+                    </div>
+
+                    {form.scoringScript.trim() && (
+                      <Button type="button" variant="ghost" size="sm" className="text-destructive" onClick={() => { setForm(f => ({ ...f, scoringScript: "" })); setScriptValidation(null); }}>
+                        <Trash2 className="h-3.5 w-3.5 mr-1" />清除脚本
+                      </Button>
+                    )}
+                  </CollapsibleContent>
+                </Collapsible>
               </div>
             </div>
           </div>

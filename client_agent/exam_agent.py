@@ -369,8 +369,6 @@ class ScriptExecutor:
             line = line.strip()
             
             # 解析每道题得分：***第 X 题...得分***:N
-            # score.sh 输出格式一般是：***第1题xxx得分***:4
-            # 这里放宽空格匹配，兼容有/无空格的情况。
             match = re.search(r'\*\*\*第\s*(\d+)\s*题.*?得分\*\*\*:(\d+)', line)
             if match:
                 question_num = int(match.group(1))
@@ -378,8 +376,28 @@ class ScriptExecutor:
                 question_scores[question_num] = score
                 continue
 
+            # 解析 Q1_SCORE=N 格式（score_a.sh / score_b.sh 的机器可读输出）
+            match = re.search(r'^Q(\d+)_SCORE=(\d+)$', line)
+            if match:
+                question_num = int(match.group(1))
+                score = int(match.group(2))
+                question_scores[question_num] = score
+                continue
+
+            # 解析单题脚本输出：SCORE:N（每题独立评分脚本的标准输出格式）
+            match = re.search(r'^SCORE:(\d+)$', line)
+            if match:
+                total_score = int(match.group(1))
+                continue
+
             # 解析总得分：总得分：N 或 总得分:N
             match = re.search(r'总得分 [:：]?\s*(\d+)', line)
+            if match:
+                total_score = int(match.group(1))
+                continue
+
+            # 解析 TOTAL_SCORE=N 格式
+            match = re.search(r'^TOTAL_SCORE=(\d+)$', line)
             if match:
                 total_score = int(match.group(1))
                 continue
@@ -615,7 +633,7 @@ class ExamController:
             print("\n[自动模式] 考试开始即计时，完成后将自动评分并提交")
 
     def run_scoring(self, questions: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """执行评分流程（支持 score.sh 格式：一次性输出全部题目分数）"""
+        """执行评分流程（支持逐题独立评分和旧版全局脚本两种模式）"""
         username = self.sys_info["username"]
 
         if not questions:
@@ -626,6 +644,67 @@ class ExamController:
                 "completedAt": datetime.now().isoformat(),
             }
 
+        # 检测是否每道题都有独立评分脚本
+        per_question = all(q.get("scoringScript") for q in questions)
+        # 检查是否每道题的脚本都不一样（真正的逐题模式）
+        unique_scripts = set(q.get("scoringScript", "") for q in questions)
+        per_question = per_question and len(unique_scripts) > 1
+
+        if per_question:
+            return self._run_per_question_scoring(questions, username)
+        else:
+            return self._run_legacy_scoring(questions, username)
+
+    def _run_per_question_scoring(self, questions: List[Dict[str, Any]], username: str) -> Dict[str, Any]:
+        """逐题执行独立评分脚本，每题脚本输出 SCORE:N"""
+        print(f"\n[评分] 开始逐题评分（共 {len(questions)} 题）...")
+        all_results: List[Dict[str, Any]] = []
+        total_score = 0
+        total_max = 0
+
+        for i, q in enumerate(questions, 1):
+            q_max = int(q.get("maxScore", 10))
+            total_max += q_max
+            script = q.get("scoringScript")
+            if not script:
+                print(f"  第 {i} 题：⚠ 无评分脚本，跳过")
+                all_results.append({
+                    "questionId": q.get("id"),
+                    "questionTitle": q.get("title"),
+                    "score": 0,
+                    "maxScore": q_max,
+                    "details": [],
+                    "rawOutput": "无评分脚本",
+                })
+                continue
+
+            print(f"  第 {i} 题：{q.get('title', '')}（{q_max} 分）... ", end="", flush=True)
+            result = self.executor.execute_script(script, username)
+            q_score = min(result.get("totalScore", 0), q_max)
+            total_score += q_score
+
+            status = "✓" if q_score == q_max else ("△" if q_score > 0 else "✗")
+            print(f"{status} {q_score}/{q_max}")
+
+            all_results.append({
+                "questionId": q.get("id"),
+                "questionTitle": q.get("title"),
+                "score": q_score,
+                "maxScore": q_max,
+                "details": result.get("details", []),
+                "rawOutput": result.get("rawOutput", ""),
+            })
+
+        print(f"\n[评分] 评分完成！总分：{total_score} / {total_max}")
+        return {
+            "totalScore": total_score,
+            "maxPossibleScore": total_max,
+            "questionResults": all_results,
+            "completedAt": datetime.now().isoformat(),
+        }
+
+    def _run_legacy_scoring(self, questions: List[Dict[str, Any]], username: str) -> Dict[str, Any]:
+        """旧版模式：执行单个全局评分脚本，解析 Q1_SCORE=N 格式"""
         scoring_script = questions[0].get("scoringScript")
         if not scoring_script:
             logger.warning("评分脚本缺失：无法自动评分")
@@ -636,7 +715,7 @@ class ExamController:
                 "completedAt": datetime.now().isoformat(),
             }
 
-        print("\n[评分] 开始执行评分脚本（一次性评分全部题目）...")
+        print("\n[评分] 开始执行评分脚本（全局模式）...")
         result = self.executor.execute_script(scoring_script, username)
 
         question_scores = result.get("questionScores", {}) or {}
@@ -661,6 +740,10 @@ class ExamController:
             })
 
             print(f"       第 {i} 题得分：{q_score} / {q_max}")
+
+        # 如果没解析到每题分数，用全局总分
+        if not question_scores and result.get("totalScore", 0) > 0:
+            total_score = result["totalScore"]
 
         print(f"\n[评分] 评分完成！总分：{total_score} / {total_max}")
         return {

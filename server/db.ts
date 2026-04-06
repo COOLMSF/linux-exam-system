@@ -203,6 +203,7 @@ export async function listQuestions(opts?: { categoryId?: number; isActive?: boo
     content: questions.content,
     difficulty: questions.difficulty,
     maxScore: questions.maxScore,
+    scoringScript: questions.scoringScript,
     sortOrder: questions.sortOrder,
     isActive: questions.isActive,
     categoryId: questions.categoryId,
@@ -411,6 +412,7 @@ export async function getAssignmentsForStudent(examId: number, studentId: number
     title: questions.title,
     maxScore: questions.maxScore,
     difficulty: questions.difficulty,
+    scoringScript: questions.scoringScript,
   }).from(examQuestionAssignments)
     .leftJoin(questions, eq(examQuestionAssignments.questionId, questions.id))
     .where(and(

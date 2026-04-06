@@ -50,6 +50,7 @@ export const questions = mysqlTable("questions", {
   categoryId: bigint("categoryId", { mode: "number", unsigned: true }),
   difficulty: int("difficulty").notNull().default(2),
   maxScore: int("maxScore").notNull().default(10),
+  scoringScript: text("scoringScript"),
   sortOrder: int("sortOrder").notNull().default(0),
   isActive: boolean("isActive").notNull().default(true),
   createdAt: timestamp("createdAt").notNull().defaultNow(),
