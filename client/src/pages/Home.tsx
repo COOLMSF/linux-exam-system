@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { trpc } from "@/lib/trpc";
-import { BookOpen, BarChart3, Terminal, ArrowRight, Server, ShieldCheck, Eye, EyeOff, Loader2, Settings } from "lucide-react";
+import { BookOpen, BarChart3, Terminal, ArrowRight, Server, ShieldCheck, Eye, EyeOff, Loader2, Settings, KeyRound } from "lucide-react";
 import { useState, useEffect } from "react";
 import { useLocation } from "wouter";
 import { toast } from "sonner";
@@ -22,18 +22,17 @@ export default function Home() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [mode, setMode] = useState<"login" | "setup">("login");
+  const [mode, setMode] = useState<"login" | "setup" | "changepwd">("login");
+  const [oldPassword, setOldPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [showNewPassword, setShowNewPassword] = useState(false);
 
   // Check if setup is needed
   const needsSetupQuery = trpc.auth.needsSetup.useQuery(undefined, { retry: false });
   const utils = trpc.useUtils();
 
   const localLoginMutation = trpc.auth.localLogin.useMutation({
-    onSuccess: () => {
-      toast.success("登录成功");
-      utils.auth.me.invalidate();
-      setLocation("/dashboard");
-    },
     onError: (err) => {
       toast.error(err.message || "登录失败，请检查用户名和密码");
     },
@@ -47,6 +46,20 @@ export default function Home() {
     },
     onError: (err) => {
       toast.error(err.message || "创建失败");
+    },
+  });
+
+  const changePasswordMutation = trpc.auth.changePassword.useMutation({
+    onSuccess: () => {
+      toast.success("密码修改成功，请使用新密码登录");
+      setMode("login");
+      setPassword("");
+      setOldPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+    },
+    onError: (err) => {
+      toast.error(err.message || "密码修改失败");
     },
   });
 
@@ -64,6 +77,28 @@ export default function Home() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (mode === "changepwd") {
+      if (!username.trim() || !oldPassword.trim() || !newPassword.trim()) {
+        toast.error("请填写所有字段");
+        return;
+      }
+      if (newPassword.length < 6) {
+        toast.error("新密码至少需要 6 位");
+        return;
+      }
+      if (newPassword !== confirmPassword) {
+        toast.error("两次输入的新密码不一致");
+        return;
+      }
+      // Login first to get session, then change password (don't redirect)
+      localLoginMutation.mutate({ username: username.trim(), password: oldPassword }, {
+        onSuccess: () => {
+          utils.auth.me.invalidate();
+          changePasswordMutation.mutate({ oldPassword, newPassword });
+        },
+      });
+      return;
+    }
     if (!username.trim() || !password.trim()) {
       toast.error("请输入用户名和密码");
       return;
@@ -75,11 +110,17 @@ export default function Home() {
       }
       setupAdminMutation.mutate({ username: username.trim(), password });
     } else {
-      localLoginMutation.mutate({ username: username.trim(), password });
+      localLoginMutation.mutate({ username: username.trim(), password }, {
+        onSuccess: () => {
+          toast.success("登录成功");
+          utils.auth.me.invalidate();
+          setLocation("/dashboard");
+        },
+      });
     }
   };
 
-  const isPending = localLoginMutation.isPending || setupAdminMutation.isPending;
+  const isPending = localLoginMutation.isPending || setupAdminMutation.isPending || changePasswordMutation.isPending;
 
   if (loading || needsSetupQuery.isLoading) {
     return (
@@ -150,17 +191,21 @@ export default function Home() {
                 <div style={{ background: "hsl(42,80%,58%)" }} className="h-10 w-10 rounded-xl flex items-center justify-center">
                   {mode === "setup" ? (
                     <Settings style={{ color: "hsl(42,30%,14%)" }} className="h-5 w-5" />
+                  ) : mode === "changepwd" ? (
+                    <KeyRound style={{ color: "hsl(42,30%,14%)" }} className="h-5 w-5" />
                   ) : (
                     <ShieldCheck style={{ color: "hsl(42,30%,14%)" }} className="h-5 w-5" />
                   )}
                 </div>
                 <div>
                   <h2 className="font-semibold text-lg">
-                    {mode === "setup" ? "初始化管理员" : "管理员登录"}
+                    {mode === "setup" ? "初始化管理员" : mode === "changepwd" ? "修改密码" : "管理员登录"}
                   </h2>
                   <p className="text-xs text-white/50">
                     {mode === "setup"
                       ? "首次使用，请创建管理员账号"
+                      : mode === "changepwd"
+                      ? "输入用户名和原密码验证身份后修改"
                       : "请输入账号密码登录管理后台"}
                   </p>
                 </div>
@@ -187,29 +232,90 @@ export default function Home() {
                     autoFocus
                   />
                 </div>
-                <div className="space-y-1.5">
-                  <Label className="text-white/80 text-sm">
-                    密码{mode === "setup" && <span className="text-white/40 ml-1 font-normal">（至少 6 位）</span>}
-                  </Label>
-                  <div className="relative">
-                    <Input
-                      type={showPassword ? "text" : "password"}
-                      placeholder={mode === "setup" ? "设置登录密码" : "请输入密码"}
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      disabled={isPending}
-                      className="bg-white/10 border-white/20 text-white placeholder:text-white/30 h-11 pr-10"
-                      autoComplete={mode === "setup" ? "new-password" : "current-password"}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword(!showPassword)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 hover:text-white/70 transition-colors"
-                    >
-                      {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                    </button>
+
+                {mode === "changepwd" ? (
+                  <>
+                    <div className="space-y-1.5">
+                      <Label className="text-white/80 text-sm">原密码</Label>
+                      <div className="relative">
+                        <Input
+                          type={showPassword ? "text" : "password"}
+                          placeholder="请输入当前密码"
+                          value={oldPassword}
+                          onChange={(e) => setOldPassword(e.target.value)}
+                          disabled={isPending}
+                          className="bg-white/10 border-white/20 text-white placeholder:text-white/30 h-11 pr-10"
+                          autoComplete="current-password"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowPassword(!showPassword)}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 hover:text-white/70 transition-colors"
+                        >
+                          {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-white/80 text-sm">新密码 <span className="text-white/40 font-normal">（至少 6 位）</span></Label>
+                      <div className="relative">
+                        <Input
+                          type={showNewPassword ? "text" : "password"}
+                          placeholder="请输入新密码"
+                          value={newPassword}
+                          onChange={(e) => setNewPassword(e.target.value)}
+                          disabled={isPending}
+                          className="bg-white/10 border-white/20 text-white placeholder:text-white/30 h-11 pr-10"
+                          autoComplete="new-password"
+                          minLength={6}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowNewPassword(!showNewPassword)}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 hover:text-white/70 transition-colors"
+                        >
+                          {showNewPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-white/80 text-sm">确认新密码</Label>
+                      <Input
+                        type="password"
+                        placeholder="再次输入新密码"
+                        value={confirmPassword}
+                        onChange={(e) => setConfirmPassword(e.target.value)}
+                        disabled={isPending}
+                        className="bg-white/10 border-white/20 text-white placeholder:text-white/30 h-11"
+                        autoComplete="new-password"
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <div className="space-y-1.5">
+                    <Label className="text-white/80 text-sm">
+                      密码{mode === "setup" && <span className="text-white/40 ml-1 font-normal">（至少 6 位）</span>}
+                    </Label>
+                    <div className="relative">
+                      <Input
+                        type={showPassword ? "text" : "password"}
+                        placeholder={mode === "setup" ? "设置登录密码" : "请输入密码"}
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        disabled={isPending}
+                        className="bg-white/10 border-white/20 text-white placeholder:text-white/30 h-11 pr-10"
+                        autoComplete={mode === "setup" ? "new-password" : "current-password"}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword(!showPassword)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 hover:text-white/70 transition-colors"
+                      >
+                        {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
+                    </div>
                   </div>
-                </div>
+                )}
 
                 <Button
                   type="submit"
@@ -221,22 +327,44 @@ export default function Home() {
                     <><Loader2 className="h-4 w-4 animate-spin mr-2" />处理中...</>
                   ) : mode === "setup" ? (
                     <><Settings className="h-4 w-4 mr-2" />创建管理员账号</>
+                  ) : mode === "changepwd" ? (
+                    <><KeyRound className="h-4 w-4 mr-2" />确认修改密码</>
                   ) : (
                     <><ArrowRight className="h-4 w-4 mr-2" />登录管理后台</>
                   )}
                 </Button>
               </form>
 
-              {mode === "login" && needsSetupQuery.data && !needsSetupQuery.data.needsSetup && (
-                <div className="mt-4 pt-4 border-t border-white/10 text-center">
+              <div className="mt-4 pt-4 border-t border-white/10 flex items-center justify-center gap-4">
+                {mode === "changepwd" ? (
                   <button
-                    onClick={() => setMode("setup")}
+                    onClick={() => setMode("login")}
                     className="text-xs text-white/40 hover:text-white/60 transition-colors"
                   >
-                    首次使用？创建管理员账号
+                    ← 返回登录
                   </button>
-                </div>
-              )}
+                ) : (
+                  <>
+                    <button
+                      onClick={() => setMode("changepwd")}
+                      className="text-xs text-white/40 hover:text-white/60 transition-colors flex items-center gap-1"
+                    >
+                      <KeyRound className="h-3 w-3" />修改密码
+                    </button>
+                    {mode === "login" && needsSetupQuery.data && !needsSetupQuery.data.needsSetup && (
+                      <span className="text-white/20">|</span>
+                    )}
+                    {mode === "login" && needsSetupQuery.data && !needsSetupQuery.data.needsSetup && (
+                      <button
+                        onClick={() => setMode("setup")}
+                        className="text-xs text-white/40 hover:text-white/60 transition-colors"
+                      >
+                        首次使用？创建管理员
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
             </div>
 
             {/* Mobile feature list */}
