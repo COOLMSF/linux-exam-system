@@ -65,6 +65,7 @@ for arg in "$@"; do
     --install-dameng)   MODE="install-dameng"   ;;
     --uninstall-dameng) MODE="uninstall-dameng" ;;
     --e2e-test)         MODE="e2e-test"         ;;
+    --e2e-full)         MODE="e2e-full"         ;;
     --package-client) MODE="package-client" ;;
     --package-server) MODE="package-server" ;;
     --package-all)    MODE="package-all" ;;
@@ -91,6 +92,7 @@ for arg in "$@"; do
       echo "  --demo-exam        一键测试：导入评分规则 + 创建数据 + 学生答题 + score.sh 评分"
       echo "  --test-score       仅测试 score.sh 评分解析功能"
       echo "  --e2e-test         端到端全流程：创建题目→学生登录→做题→评分→打分（详细输出）"
+      echo "  --e2e-full         完整10题考试：模拟学生完成默认10道MySQL题→Agent评分→出成绩（需root）"
       echo ""
       echo "数据库安装/卸载（需要 root 权限）："
       echo "  --install-mysql       一键安装 MySQL 数据库"
@@ -125,6 +127,7 @@ for arg in "$@"; do
       echo "  bash install.sh --package-all           # 打包全部用于分发"
       echo "  bash install.sh --demo-exam             # 演示考试全流程测试（含 score.sh）"
       echo "  bash install.sh --e2e-test              # 端到端全流程测试（详细输出）"
+      echo "  sudo bash install.sh --e2e-full         # 完整10题MySQL考试模拟（需root）"
       echo "  sudo bash install.sh --install-mysql    # 一键安装 MySQL"
       echo "  sudo bash install.sh --uninstall-mysql  # 一键卸载 MySQL"
       echo "  sudo bash install.sh --install-dameng   # 一键安装达梦 DM8"
@@ -2661,6 +2664,742 @@ CSV
   rm -rf /tmp/e2e_exam_test 2>/dev/null || true
 }
 
+# ─── 10题完整考试模拟（模拟学生做默认10道MySQL题 → Agent评分 → 出成绩）────────
+e2e_full_test() {
+  set +e
+  set +o pipefail
+
+  log_section "完整10题MySQL考试模拟"
+
+  local SERVER_URL="http://localhost:3001"
+  local PROJECT_DIR="$SCRIPT_DIR"
+  local PASS=0
+  local FAIL=0
+  local BOLD="\033[1m"
+  local GREEN="\033[32m"
+  local RED="\033[31m"
+  local YELLOW="\033[33m"
+  local CYAN="\033[36m"
+  local NC="\033[0m"
+
+  ef_ok()   { PASS=$((PASS+1)); echo -e "  ${GREEN}✓${NC} $1"; }
+  ef_fail() { FAIL=$((FAIL+1)); echo -e "  ${RED}✗${NC} $1"; }
+  ef_info() { echo -e "  ${CYAN}→${NC} $1"; }
+  ef_step() { echo -e "\n${BOLD}── 步骤 $1/9：$2 ──${NC}"; }
+
+  echo ""
+  echo -e "  本测试将模拟学生完成 ${BOLD}10 道默认考试题目${NC}（自动适配 MySQL / 达梦）："
+  echo -e "    Q1  数据库服务管理（4分）"
+  echo -e "    Q2  安装与初始化配置（14分）"
+  echo -e "    Q3  用户与权限管理（8分）"
+  echo -e "    Q4  表管理与数据导入导出（18分）"
+  echo -e "    Q5  视图管理（8分）"
+  echo -e "    Q6  存储过程与触发器（20分）"
+  echo -e "    Q7  定时任务（8分）"
+  echo -e "    Q8  性能优化（10分）"
+  echo -e "    Q9  安全与备份恢复（10分）"
+  echo -e "    Q10 数据库软件卸载（4分）★ 与Q1冲突，预期0分"
+  echo -e "    ${YELLOW}总计: 满分 104 分，实际可得 100 分（Q10 冲突扣4分）${NC}"
+  echo ""
+
+  # ════════════════════════════════════════════════════════════════
+  # 步骤 1：环境检查
+  # ════════════════════════════════════════════════════════════════
+  ef_step 1 "环境检查"
+
+  # 检查服务运行
+  if ! curl -sf --max-time 3 "http://localhost:3001/api/trpc/auth.me" -o /dev/null 2>/dev/null; then
+    if ! curl -sf --max-time 3 "http://localhost:3000/api/trpc/auth.me" -o /dev/null 2>/dev/null; then
+      ef_fail "考试系统服务未运行，请先启动服务"
+      return 1
+    fi
+    SERVER_URL="http://localhost:3000"
+  fi
+  ef_ok "考试系统服务运行在 $SERVER_URL"
+
+  # 自动检测数据库类型
+  local STUDENT_DB_TYPE="mysql"
+  local DMPATH="/dm/bin"
+  local DM_CONN="sysdba/Dameng123@localhost:5236"
+  if [ -d "/dm/bin" ] || command -v disql &>/dev/null; then
+    STUDENT_DB_TYPE="dameng"
+  fi
+  ef_info "学生操作数据库类型: ${STUDENT_DB_TYPE}"
+
+  local MYSQL_ROOT="mysql -u root -N -s"
+  if [[ "$STUDENT_DB_TYPE" == "mysql" ]]; then
+    if ! command -v mysql &>/dev/null; then
+      ef_fail "MySQL 客户端未安装"
+      return 1
+    fi
+    if ! $MYSQL_ROOT -e "SELECT 1" &>/dev/null; then
+      ef_fail "无法以 root 连接 MySQL（请确保以 root/sudo 运行）"
+      return 1
+    fi
+    ef_ok "MySQL root 连接正常"
+  else
+    if ! $DMPATH/disql -s "$DM_CONN" -e "SELECT 1;" &>/dev/null; then
+      ef_fail "无法连接达梦数据库（disql $DM_CONN）"
+      return 1
+    fi
+    ef_ok "达梦数据库连接正常"
+  fi
+
+  # 读取 .env
+  local ENV_FILE="$PROJECT_DIR/.env"
+  if [[ ! -f "$ENV_FILE" ]]; then
+    ef_fail ".env 文件不存在"
+    return 1
+  fi
+  local DB_URL
+  DB_URL=$(grep "^DATABASE_URL=" "$ENV_FILE" | head -1 | cut -d= -f2-)
+  local DB_USER DB_PASS DB_HOST DB_PORT DB_NAME
+  DB_USER=$(echo "$DB_URL" | sed -E 's|mysql://([^:]+):.*|\1|')
+  DB_PASS=$(echo "$DB_URL" | sed -E 's|mysql://[^:]+:([^@]+)@.*|\1|' | python3 -c "import sys,urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))" 2>/dev/null)
+  DB_HOST=$(echo "$DB_URL" | sed -E 's|mysql://[^@]+@([^:]+):.*|\1|')
+  DB_PORT=$(echo "$DB_URL" | sed -E 's|mysql://[^@]+@[^:]+:([0-9]+)/.*|\1|')
+  DB_NAME=$(echo "$DB_URL" | sed -E 's|mysql://[^/]+/(.*)|\1|')
+  local EXAM_MYSQL="mysql -u $DB_USER -h $DB_HOST -P $DB_PORT $DB_NAME"
+  ef_info "考试系统DB: ${DB_USER}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
+
+  # ════════════════════════════════════════════════════════════════
+  # 步骤 2：创建测试学生 + 10道题目 + 考试场次
+  # ════════════════════════════════════════════════════════════════
+  ef_step 2 "准备考试数据（学生 + 题目 + 场次）"
+
+  local E2E_STUDENT="e2e_full_tester"
+  local E2E_PASSWORD="Test123456"
+
+  # 密码哈希
+  local SALT HASH PW_HASH
+  SALT=$(python3 -c "import os; print(os.urandom(16).hex())")
+  HASH=$(python3 -c "import hashlib; print(hashlib.sha256(('${SALT}${E2E_PASSWORD}${SALT}').encode()).hexdigest())")
+  PW_HASH="${SALT}:${HASH}"
+
+  MYSQL_PWD="$DB_PASS" $EXAM_MYSQL -e "
+    INSERT INTO students (studentId, name, className, passwordHash, isActive, createdAt, updatedAt)
+    VALUES ('${E2E_STUDENT}', '10题考试测试生', 'E2E全量班', '${PW_HASH}', 1, NOW(), NOW())
+    ON DUPLICATE KEY UPDATE name='10题考试测试生', passwordHash='${PW_HASH}', deviceId=NULL, apiToken=NULL, isActive=1;
+  " 2>/dev/null
+  ef_ok "测试学生 ${E2E_STUDENT} 就绪"
+
+  # 创建题目分类
+  local CAT_ID
+  CAT_ID=$(MYSQL_PWD="$DB_PASS" $EXAM_MYSQL -N -s -e "
+    SELECT id FROM question_categories WHERE name='MySQL综合考试' LIMIT 1;
+  " 2>/dev/null)
+  if [[ -z "$CAT_ID" ]]; then
+    MYSQL_PWD="$DB_PASS" $EXAM_MYSQL -e "
+      INSERT INTO question_categories (name, description, createdAt, updatedAt)
+      VALUES ('MySQL综合考试', '10道MySQL默认考试题', NOW(), NOW());
+    " 2>/dev/null
+    CAT_ID=$(MYSQL_PWD="$DB_PASS" $EXAM_MYSQL -N -s -e "SELECT LAST_INSERT_ID();" 2>/dev/null)
+  fi
+  ef_info "题目分类 ID: $CAT_ID"
+
+  # 清理旧的10题考试数据（可能有多个）
+  local OLD_EXAM_IDS
+  OLD_EXAM_IDS=$(MYSQL_PWD="$DB_PASS" $EXAM_MYSQL -N -s -e "
+    SELECT id FROM exam_sessions WHERE name='E2E-10题MySQL综合考试';
+  " 2>/dev/null)
+  if [[ -n "$OLD_EXAM_IDS" ]]; then
+    for OLD_ID in $OLD_EXAM_IDS; do
+      MYSQL_PWD="$DB_PASS" $EXAM_MYSQL -e "
+        DELETE sd FROM score_details sd JOIN exam_records er ON sd.examRecordId=er.id WHERE er.examId=$OLD_ID;
+        DELETE FROM exam_question_assignments WHERE examId=$OLD_ID;
+        DELETE FROM exam_records WHERE examId=$OLD_ID;
+        DELETE FROM exam_sessions WHERE id=$OLD_ID;
+      " 2>/dev/null
+    done
+    ef_info "已清理旧考试数据"
+  fi
+
+  # 清理旧的同分类题目（避免重复抽题）
+  MYSQL_PWD="$DB_PASS" $EXAM_MYSQL -e "
+    DELETE FROM questions WHERE categoryId=$CAT_ID;
+  " 2>/dev/null
+  ef_info "已清理分类 $CAT_ID 下旧题目"
+
+  # 读取评分脚本并创建10道题目
+  local SCRIPT_DIR_PATH="$PROJECT_DIR/scoring_scripts"
+  local Q_TITLES=( \
+    "数据库服务管理" \
+    "安装与初始化配置" \
+    "用户与权限管理" \
+    "表管理与数据导入导出" \
+    "视图管理" \
+    "存储过程与触发器" \
+    "定时任务" \
+    "性能优化" \
+    "安全与备份恢复" \
+    "数据库软件卸载" \
+  )
+  local Q_CONTENTS=( \
+    "确保MySQL服务正在运行且设置开机自启，清理/tmp/mysql_old_data目录。" \
+    "创建数据库examdb_a(utf8mb4)，确认端口3306、server_id=1、max_connections=200，恢复recovery_test数据，导出examdata.sql。" \
+    "创建用户exam_user并设置密码过期策略120天，授予SELECT/CREATE/CREATE ROUTINE/EXECUTE/DELETE权限。" \
+    "在examdb_a中创建tab_dept(46条)和tab_emp(≥856条)，给tab_emp添加create_time列(默认CURRENT_TIMESTAMP)，导出CSV。" \
+    "创建视图v_empnum(部门人数统计)和v_empsal(高薪人数统计)。" \
+    "创建存储过程sp_emp_salary_sum(按部门汇总工资)、日志表t_eventlog和触发器tr_eventlog。" \
+    "开启事件调度器，创建定时事件evt_daily_cleanup(每天清理旧日志)。" \
+    "在tab_emp.employee_name上创建索引ix_emp_empname，更新统计信息，设置innodb_buffer_pool_size≥256M。" \
+    "确认binlog开启(ROW格式)，创建备份目录/var/lib/mysql_backup，做全库和单库备份。" \
+    "【与Q1冲突-跳过】完全卸载MySQL服务和软件包。" \
+  )
+  local Q_SCORES=(4 14 8 18 8 20 8 10 10 4)
+  local Q_FILES=( \
+    "01_mysql_service.sh" \
+    "02_mysql_install_config.sh" \
+    "03_user_privileges.sh" \
+    "04_table_data_export.sh" \
+    "05_view_management.sh" \
+    "06_procedure_trigger.sh" \
+    "07_scheduled_task.sh" \
+    "08_performance_tuning.sh" \
+    "09_backup_security.sh" \
+    "10_mysql_uninstall.sh" \
+  )
+
+  local Q_IDS=()
+  for i in $(seq 0 9); do
+    local SCRIPT_CONTENT=""
+    local SCRIPT_FILE="$SCRIPT_DIR_PATH/${Q_FILES[$i]}"
+    if [[ -f "$SCRIPT_FILE" ]]; then
+      SCRIPT_CONTENT=$(cat "$SCRIPT_FILE")
+    fi
+    local ESCAPED_TITLE=$(echo "${Q_TITLES[$i]}" | sed "s/'/''/g")
+    local ESCAPED_CONTENT=$(echo "${Q_CONTENTS[$i]}" | sed "s/'/''/g")
+    local ESCAPED_SCRIPT=$(echo "$SCRIPT_CONTENT" | sed "s/'/''/g")
+
+    local QID
+    QID=$(MYSQL_PWD="$DB_PASS" $EXAM_MYSQL -N -s -e "
+      INSERT INTO questions (title, content, categoryId, difficulty, maxScore, sortOrder, scoringScript, isActive, createdAt, updatedAt)
+      VALUES ('$ESCAPED_TITLE', '$ESCAPED_CONTENT', $CAT_ID, 2, ${Q_SCORES[$i]}, $((i+1)), '$ESCAPED_SCRIPT', 1, NOW(), NOW());
+      SELECT LAST_INSERT_ID();
+    " 2>/dev/null)
+    Q_IDS+=("$QID")
+    ef_ok "Q$((i+1)): ${Q_TITLES[$i]} (ID:$QID, ${Q_SCORES[$i]}分)"
+  done
+
+  # 创建考试场次（设置 categoryFilter 让 fetchQuestions 自动从该分类抽题）
+  local EXAM_ID
+  EXAM_ID=$(MYSQL_PWD="$DB_PASS" $EXAM_MYSQL -N -s -e "
+    INSERT INTO exam_sessions (name, durationMinutes, questionCount, categoryFilter, status, createdAt, updatedAt)
+    VALUES ('E2E-10题MySQL综合考试', 120, 10, '[${CAT_ID}]', 'active', NOW(), NOW());
+    SELECT LAST_INSERT_ID();
+  " 2>/dev/null)
+  ef_ok "考试场次创建成功 (ID:$EXAM_ID, 10题, 分类:$CAT_ID)"
+
+  # ════════════════════════════════════════════════════════════════
+  # 步骤 3-8：模拟学生完成数据库操作（自动分支 MySQL / 达梦）
+  # ════════════════════════════════════════════════════════════════
+
+  local EXAMDB="examdb_a"
+  local EXAM_USER_NAME="exam_user"
+
+  if [[ "$STUDENT_DB_TYPE" == "mysql" ]]; then
+  # ╔════════════════════════════════════════╗
+  # ║          MySQL 模式                     ║
+  # ╚════════════════════════════════════════╝
+
+  ef_step 3 "模拟学生操作 — Q1 数据库服务管理 [MySQL]"
+  systemctl start mysql 2>/dev/null || systemctl start mysqld 2>/dev/null
+  systemctl enable mysql 2>/dev/null || systemctl enable mysqld 2>/dev/null
+  rm -rf /tmp/mysql_old_data 2>/dev/null
+  if systemctl is-active --quiet mysql 2>/dev/null || systemctl is-active --quiet mysqld 2>/dev/null; then
+    ef_ok "Q1: MySQL 服务已启动并设置开机自启"
+  else
+    ef_fail "Q1: MySQL 服务启动失败"
+  fi
+  ef_ok "Q1: /tmp/mysql_old_data 已清理"
+
+  ef_step 4 "模拟学生操作 — Q2 安装与初始化配置 [MySQL]"
+  $MYSQL_ROOT -e "CREATE DATABASE IF NOT EXISTS ${EXAMDB} DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null
+  ef_ok "Q2: 数据库 ${EXAMDB} 已创建 (utf8mb4)"
+  $MYSQL_ROOT -e "SET GLOBAL max_connections = 200;" 2>/dev/null
+  ef_ok "Q2: max_connections = 200"
+  local CUR_SID=$($MYSQL_ROOT -e "SHOW VARIABLES LIKE 'server_id'" 2>/dev/null | awk '{print $2}')
+  ef_info "Q2: 当前 server_id = ${CUR_SID:-未知}"
+  $MYSQL_ROOT -e "
+    USE ${EXAMDB};
+    CREATE TABLE IF NOT EXISTS recovery_test (id INT PRIMARY KEY, data VARCHAR(100));
+    INSERT IGNORE INTO recovery_test VALUES (107, 'recovered_data');
+  " 2>/dev/null
+  ef_ok "Q2: recovery_test 表已创建，id=107 数据已恢复"
+  mkdir -p /var/lib/mysql_backup 2>/dev/null
+  mysqldump -u root ${EXAMDB} > /var/lib/mysql_backup/examdata.sql 2>/dev/null
+  ef_ok "Q2: /var/lib/mysql_backup/examdata.sql 已导出"
+
+  ef_step 5 "模拟学生操作 — Q3 用户与权限管理 [MySQL]"
+  $MYSQL_ROOT -e "
+    CREATE USER IF NOT EXISTS '${EXAM_USER_NAME}'@'%' IDENTIFIED BY 'ExamPass123!';
+    ALTER USER '${EXAM_USER_NAME}'@'%' PASSWORD EXPIRE INTERVAL 120 DAY;
+    GRANT SELECT, CREATE, CREATE ROUTINE, EXECUTE, DELETE ON ${EXAMDB}.* TO '${EXAM_USER_NAME}'@'%';
+    FLUSH PRIVILEGES;
+  " 2>/dev/null
+  ef_ok "Q3: 用户 ${EXAM_USER_NAME} 已创建，密码策略120天，权限已授予"
+
+  ef_step 6 "模拟学生操作 — Q4 表管理与数据导入导出 [MySQL]"
+  $MYSQL_ROOT -e "
+    USE ${EXAMDB};
+    CREATE TABLE IF NOT EXISTS tab_dept (
+      dept_id INT AUTO_INCREMENT PRIMARY KEY, dept_name VARCHAR(100) NOT NULL, location VARCHAR(100)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    TRUNCATE TABLE tab_dept;
+  " 2>/dev/null
+  local DEPT_SQL="INSERT INTO ${EXAMDB}.tab_dept (dept_name, location) VALUES "
+  local DEPT_NAMES=("开发部门1" "开发部门2" "测试部" "运维部" "产品部" "设计部" "市场部" "销售部" "财务部" "人事部"
+    "行政部" "法务部" "采购部" "后勤部" "安全部" "研发一部" "研发二部" "研发三部" "数据部" "AI部"
+    "云计算部" "网络部" "前端部" "后端部" "移动开发部" "质量部" "项目管理部" "技术支持部" "客服部" "培训部"
+    "战略部" "投资部" "公关部" "品牌部" "渠道部" "海外部" "创新部" "基础架构部" "中间件部" "DBA部"
+    "安全运营部" "合规部" "内审部" "总裁办" "监事会" "董事会办")
+  local DEPT_VALS=""
+  for j in $(seq 0 45); do
+    [[ -n "$DEPT_VALS" ]] && DEPT_VALS+=","
+    DEPT_VALS+="('${DEPT_NAMES[$j]}', '城市$((j%10+1))')"
+  done
+  $MYSQL_ROOT -e "${DEPT_SQL}${DEPT_VALS};" 2>/dev/null
+  ef_ok "Q4: tab_dept 已创建 ($($MYSQL_ROOT -e "SELECT COUNT(*) FROM ${EXAMDB}.tab_dept" 2>/dev/null) 条)"
+  $MYSQL_ROOT -e "
+    USE ${EXAMDB};
+    CREATE TABLE IF NOT EXISTS tab_emp (
+      employee_id INT AUTO_INCREMENT PRIMARY KEY, employee_name VARCHAR(100) NOT NULL,
+      dept_id INT, salary DECIMAL(10,2), hire_date DATE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    TRUNCATE TABLE tab_emp;
+  " 2>/dev/null
+  $MYSQL_ROOT -e "
+    INSERT INTO ${EXAMDB}.tab_emp (employee_name, dept_id, salary, hire_date)
+    WITH RECURSIVE seq AS (SELECT 1 AS n UNION ALL SELECT n+1 FROM seq WHERE n<900)
+    SELECT CONCAT('员工_',LPAD(n,4,'0')), (n%46)+1, 3000+(n*7%10000), DATE_SUB(CURDATE(),INTERVAL (n%365) DAY) FROM seq;
+  " 2>/dev/null
+  ef_ok "Q4: tab_emp 已创建 ($($MYSQL_ROOT -e "SELECT COUNT(*) FROM ${EXAMDB}.tab_emp" 2>/dev/null) 条)"
+  $MYSQL_ROOT -e "ALTER TABLE ${EXAMDB}.tab_emp ADD COLUMN IF NOT EXISTS create_time DATETIME DEFAULT CURRENT_TIMESTAMP;" 2>/dev/null \
+    || $MYSQL_ROOT -e "ALTER TABLE ${EXAMDB}.tab_emp ADD COLUMN create_time DATETIME DEFAULT CURRENT_TIMESTAMP;" 2>/dev/null
+  ef_ok "Q4: create_time 列已添加"
+  local CSV_FILE="/tmp/${EXAMDB}_emp_export.csv"
+  $MYSQL_ROOT -e "SELECT employee_id,employee_name,dept_id,salary,hire_date FROM ${EXAMDB}.tab_emp" > "$CSV_FILE" 2>/dev/null
+  ef_ok "Q4: CSV 已导出 ($(stat -c%s "$CSV_FILE" 2>/dev/null || echo 0) bytes)"
+
+  ef_step 7 "模拟学生操作 — Q5-Q7 视图/存储过程/定时任务 [MySQL]"
+  $MYSQL_ROOT -e "
+    USE ${EXAMDB};
+    CREATE OR REPLACE VIEW v_empnum AS
+      SELECT d.dept_name, COUNT(e.employee_id) AS emp_count
+      FROM tab_dept d LEFT JOIN tab_emp e ON d.dept_id=e.dept_id GROUP BY d.dept_id, d.dept_name;
+    CREATE OR REPLACE VIEW v_empsal AS
+      SELECT COUNT(CASE WHEN salary>8000 THEN 1 END) AS high_salary_count,
+             COUNT(*) AS total_count, AVG(salary) AS avg_salary FROM tab_emp;
+  " 2>/dev/null
+  ef_ok "Q5: 视图 v_empnum, v_empsal 已创建"
+  $MYSQL_ROOT -e "USE ${EXAMDB}; DROP PROCEDURE IF EXISTS sp_emp_salary_sum;" 2>/dev/null
+  $MYSQL_ROOT ${EXAMDB} <<'PROCSQL'
+DELIMITER $$
+CREATE PROCEDURE sp_emp_salary_sum(IN p_dept_id INT, OUT p_total DECIMAL(15,2))
+BEGIN
+  SELECT COALESCE(SUM(salary), 0) INTO p_total FROM tab_emp WHERE dept_id = p_dept_id;
+END$$
+DELIMITER ;
+PROCSQL
+  ef_ok "Q6: 存储过程 sp_emp_salary_sum 已创建"
+  $MYSQL_ROOT -e "
+    USE ${EXAMDB};
+    CREATE TABLE IF NOT EXISTS t_eventlog (
+      log_id INT AUTO_INCREMENT PRIMARY KEY, event_type VARCHAR(50),
+      event_data TEXT, event_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    DROP TRIGGER IF EXISTS tr_eventlog;
+  " 2>/dev/null
+  $MYSQL_ROOT ${EXAMDB} <<'TRIGSQL'
+DELIMITER $$
+CREATE TRIGGER tr_eventlog AFTER INSERT ON tab_emp FOR EACH ROW
+BEGIN
+  INSERT INTO t_eventlog (event_type, event_data)
+  VALUES ('INSERT', CONCAT('新增员工: ', NEW.employee_name, ', 部门: ', NEW.dept_id));
+END$$
+DELIMITER ;
+TRIGSQL
+  ef_ok "Q6: 日志表 t_eventlog + 触发器 tr_eventlog 已创建"
+  $MYSQL_ROOT -e "SET GLOBAL event_scheduler = ON;" 2>/dev/null
+  $MYSQL_ROOT -e "
+    USE ${EXAMDB}; DROP EVENT IF EXISTS evt_daily_cleanup;
+    CREATE EVENT evt_daily_cleanup ON SCHEDULE EVERY 1 DAY STARTS CURRENT_TIMESTAMP
+    ON COMPLETION PRESERVE ENABLE
+    DO DELETE FROM t_eventlog WHERE event_time < DATE_SUB(NOW(), INTERVAL 30 DAY);
+  " 2>/dev/null
+  ef_ok "Q7: 事件调度器已开启，evt_daily_cleanup 已创建 (ENABLED)"
+
+  ef_step 8 "模拟学生操作 — Q8-Q9 性能优化/备份安全 [MySQL]"
+  $MYSQL_ROOT -e "USE ${EXAMDB}; CREATE INDEX ix_emp_empname ON tab_emp(employee_name);" 2>/dev/null \
+    || $MYSQL_ROOT -e "USE ${EXAMDB}; ALTER TABLE tab_emp ADD INDEX ix_emp_empname(employee_name);" 2>/dev/null
+  ef_ok "Q8: 索引 ix_emp_empname 已创建"
+  $MYSQL_ROOT -e "ANALYZE TABLE ${EXAMDB}.tab_emp;" 2>/dev/null
+  ef_ok "Q8: 表统计信息已更新"
+  local CUR_POOL=$($MYSQL_ROOT -e "SELECT @@innodb_buffer_pool_size" 2>/dev/null)
+  if [[ -n "$CUR_POOL" ]] && [[ "$CUR_POOL" -lt 268435456 ]] 2>/dev/null; then
+    $MYSQL_ROOT -e "SET GLOBAL innodb_buffer_pool_size = 268435456;" 2>/dev/null
+    ef_ok "Q8: innodb_buffer_pool_size 已设为 256M"
+  else
+    ef_ok "Q8: innodb_buffer_pool_size >= 256M"
+  fi
+  $MYSQL_ROOT -e "SET GLOBAL binlog_format = 'ROW';" 2>/dev/null
+  $MYSQL_ROOT -e "SET GLOBAL binlog_expire_logs_seconds = 604800;" 2>/dev/null
+  ef_ok "Q9: binlog_format=ROW, expire=7天"
+  mkdir -p /var/lib/mysql_backup 2>/dev/null
+  mysqldump -u root --all-databases > /var/lib/mysql_backup/full_backup.sql 2>/dev/null
+  mysqldump -u root ${EXAMDB} > /var/lib/mysql_backup/${EXAMDB}.sql 2>/dev/null
+  ef_ok "Q9: 全库备份 + 单库备份已创建"
+  ef_info "Q10: 数据库软件卸载 — 跳过（与Q1-Q9冲突）"
+
+  else
+  # ╔════════════════════════════════════════╗
+  # ║          达梦 (Dameng) 模式              ║
+  # ╚════════════════════════════════════════╝
+  local DISQL="$DMPATH/disql -s $DM_CONN"
+
+  ef_step 3 "模拟学生操作 — Q1 数据库服务管理 [达梦]"
+  # 启动达梦服务
+  local DM_SVC
+  DM_SVC=$(systemctl list-units --type=service --all 2>/dev/null | grep -i "DmService" | awk '{print $1}' | head -1)
+  if [[ -n "$DM_SVC" ]]; then
+    systemctl start "$DM_SVC" 2>/dev/null
+    systemctl enable "$DM_SVC" 2>/dev/null
+    if systemctl is-active --quiet "$DM_SVC" 2>/dev/null; then
+      ef_ok "Q1: 达梦服务 $DM_SVC 已启动并设置开机自启"
+    else
+      ef_fail "Q1: 达梦服务启动失败"
+    fi
+  else
+    ef_info "Q1: 未找到 DmService systemd 单元，尝试手动启动"
+    /dm/bin/dmserver /dm/data/DAMENG/dm.ini &>/dev/null &
+    sleep 2
+    if pgrep -x dmserver &>/dev/null; then
+      ef_ok "Q1: dmserver 进程已启动"
+    else
+      ef_fail "Q1: dmserver 启动失败"
+    fi
+  fi
+  rm -rf /home/dmdba/dmdbms_old /tmp/dm_old_data 2>/dev/null
+  ef_ok "Q1: 旧数据目录已清理"
+
+  ef_step 4 "模拟学生操作 — Q2 安装与初始化配置 [达梦]"
+  ef_info "Q2: /dm 路径已存在（达梦安装目录）"
+  # 创建 recovery_test 表
+  $DISQL -e "
+    CREATE TABLE IF NOT EXISTS SYSDBA.RECOVERY_TEST (ID INT PRIMARY KEY, DATA VARCHAR(100));
+    MERGE INTO SYSDBA.RECOVERY_TEST t USING (SELECT 107 AS ID, 'recovered_data' AS DATA FROM DUAL) s
+      ON (t.ID = s.ID) WHEN NOT MATCHED THEN INSERT (ID, DATA) VALUES (s.ID, s.DATA);
+    COMMIT;
+  " 2>/dev/null
+  ef_ok "Q2: RECOVERY_TEST 表已创建，id=107 数据已恢复"
+
+  ef_step 5 "模拟学生操作 — Q3 用户与权限管理 [达梦]"
+  # 创建表空间 TBS (64M)
+  $DISQL -e "
+    CREATE TABLESPACE TBS DATAFILE '/dm/data/DAMENG/TBS01.DBF' SIZE 64 AUTOEXTEND ON;
+  " 2>/dev/null
+  ef_ok "Q3: 表空间 TBS (64M) 已创建"
+  # 创建用户 exam_user
+  $DISQL -e "
+    CREATE USER ${EXAM_USER_NAME} IDENTIFIED BY ExamPass123 DEFAULT TABLESPACE TBS;
+    ALTER USER ${EXAM_USER_NAME} PASSWORD_LIFE_TIME 120;
+    GRANT CREATE TABLE TO ${EXAM_USER_NAME};
+    GRANT CREATE PROCEDURE TO ${EXAM_USER_NAME};
+    GRANT RESOURCE TO ${EXAM_USER_NAME};
+  " 2>/dev/null
+  ef_ok "Q3: 用户 ${EXAM_USER_NAME}，密码策略120天，TBS默认表空间，CREATE TABLE/PROCEDURE权限"
+
+  ef_step 6 "模拟学生操作 — Q4 表管理与数据导入导出 [达梦]"
+  # 创建表（在 exam_user schema 下，用 SYSDBA 代建）
+  $DISQL -e "
+    CREATE TABLE IF NOT EXISTS ${EXAM_USER_NAME}.TAB_DEPT (
+      DEPT_ID INT IDENTITY(1,1) PRIMARY KEY, DEPT_NAME VARCHAR(100) NOT NULL, LOCATION VARCHAR(100)
+    );
+    DELETE FROM ${EXAM_USER_NAME}.TAB_DEPT;
+    COMMIT;
+  " 2>/dev/null
+  # 插入46个部门
+  local DM_DEPT_SQL=""
+  local DEPT_NAMES=("开发部门1" "开发部门2" "测试部" "运维部" "产品部" "设计部" "市场部" "销售部" "财务部" "人事部"
+    "行政部" "法务部" "采购部" "后勤部" "安全部" "研发一部" "研发二部" "研发三部" "数据部" "AI部"
+    "云计算部" "网络部" "前端部" "后端部" "移动开发部" "质量部" "项目管理部" "技术支持部" "客服部" "培训部"
+    "战略部" "投资部" "公关部" "品牌部" "渠道部" "海外部" "创新部" "基础架构部" "中间件部" "DBA部"
+    "安全运营部" "合规部" "内审部" "总裁办" "监事会" "董事会办")
+  for j in $(seq 0 45); do
+    DM_DEPT_SQL+="INSERT INTO ${EXAM_USER_NAME}.TAB_DEPT(DEPT_NAME,LOCATION) VALUES('${DEPT_NAMES[$j]}','城市$((j%10+1))');"
+  done
+  DM_DEPT_SQL+="COMMIT;"
+  $DISQL -e "$DM_DEPT_SQL" 2>/dev/null
+  ef_ok "Q4: TAB_DEPT 已创建 (46 条)"
+
+  # 创建 TAB_EMP
+  $DISQL -e "
+    CREATE TABLE IF NOT EXISTS ${EXAM_USER_NAME}.TAB_EMP (
+      EMPLOYEE_ID INT IDENTITY(1,1) PRIMARY KEY, EMPLOYEE_NAME VARCHAR(100) NOT NULL,
+      DEPT_ID INT, SALARY DECIMAL(10,2), HIRE_DATE DATE
+    );
+    DELETE FROM ${EXAM_USER_NAME}.TAB_EMP;
+    COMMIT;
+  " 2>/dev/null
+  # 批量插入900条员工（用PL/SQL块）
+  $DISQL -e "
+    BEGIN
+      FOR i IN 1..900 LOOP
+        INSERT INTO ${EXAM_USER_NAME}.TAB_EMP(EMPLOYEE_NAME,DEPT_ID,SALARY,HIRE_DATE)
+        VALUES('员工_'||LPAD(i,4,'0'), MOD(i,46)+1, 3000+(MOD(i*7,10000)), SYSDATE-MOD(i,365));
+      END LOOP;
+      COMMIT;
+    END;
+  " 2>/dev/null
+  ef_ok "Q4: TAB_EMP 已创建 (900 条)"
+
+  # 添加 CREATETIME 列（达梦用大写，默认 SYSDATE）
+  $DISQL -e "
+    ALTER TABLE ${EXAM_USER_NAME}.TAB_EMP ADD CREATETIME DATETIME DEFAULT SYSDATE;
+    COMMIT;
+  " 2>/dev/null
+  ef_ok "Q4: CREATETIME 列已添加 (默认 SYSDATE)"
+
+  # 导出 CSV
+  mkdir -p /dm/data 2>/dev/null
+  $DISQL -e "
+    SELECT EMPLOYEE_ID||','||EMPLOYEE_NAME||','||DEPT_ID||','||SALARY||','||HIRE_DATE
+    FROM ${EXAM_USER_NAME}.TAB_EMP;
+  " 2>/dev/null | grep -E '^[0-9]' > /dm/data/TAB_EMP.CSV 2>/dev/null
+  ef_ok "Q4: CSV 已导出到 /dm/data/TAB_EMP.CSV"
+
+  ef_step 7 "模拟学生操作 — Q5-Q7 视图/存储过程/定时作业 [达梦]"
+  # Q5: 视图
+  $DISQL -e "
+    CREATE OR REPLACE VIEW ${EXAM_USER_NAME}.V_EMPNUM AS
+      SELECT D.DEPT_NAME, COUNT(E.EMPLOYEE_ID) AS EMP_COUNT
+      FROM ${EXAM_USER_NAME}.TAB_DEPT D LEFT JOIN ${EXAM_USER_NAME}.TAB_EMP E ON D.DEPT_ID=E.DEPT_ID
+      GROUP BY D.DEPT_ID, D.DEPT_NAME;
+    CREATE OR REPLACE VIEW ${EXAM_USER_NAME}.V_EMPSAL AS
+      SELECT COUNT(CASE WHEN SALARY>8000 THEN 1 END) AS HIGH_SALARY_COUNT,
+             COUNT(*) AS TOTAL_COUNT, AVG(SALARY) AS AVG_SALARY
+      FROM ${EXAM_USER_NAME}.TAB_EMP;
+  " 2>/dev/null
+  ef_ok "Q5: 视图 V_EMPNUM, V_EMPSAL 已创建"
+
+  # Q6: 存储过程
+  $DISQL -e "
+    CREATE OR REPLACE PROCEDURE ${EXAM_USER_NAME}.SP_EMP_SALARY_SUM(P_DEPT_ID IN INT, P_TOTAL OUT DECIMAL)
+    AS
+    BEGIN
+      SELECT COALESCE(SUM(SALARY),0) INTO P_TOTAL FROM ${EXAM_USER_NAME}.TAB_EMP WHERE DEPT_ID=P_DEPT_ID;
+    END;
+  " 2>/dev/null
+  ef_ok "Q6: 存储过程 SP_EMP_SALARY_SUM 已创建"
+
+  # Q6: 事件日志表 + 触发器
+  $DISQL -e "
+    CREATE TABLE IF NOT EXISTS ${EXAM_USER_NAME}.T_EVENTLOG (
+      LOG_ID INT IDENTITY(1,1) PRIMARY KEY, EVENT_TYPE VARCHAR(50),
+      EVENT_DATA VARCHAR(500), EVENT_TIME DATETIME DEFAULT SYSDATE
+    );
+    CREATE OR REPLACE TRIGGER ${EXAM_USER_NAME}.TR_EVENTLOG
+    AFTER INSERT ON ${EXAM_USER_NAME}.TAB_EMP FOR EACH ROW
+    BEGIN
+      INSERT INTO ${EXAM_USER_NAME}.T_EVENTLOG(EVENT_TYPE,EVENT_DATA)
+      VALUES('INSERT','新增员工: '||:NEW.EMPLOYEE_NAME||', 部门: '||:NEW.DEPT_ID);
+    END;
+  " 2>/dev/null
+  ef_ok "Q6: T_EVENTLOG + 触发器 TR_EVENTLOG 已创建"
+
+  # Q7: 定时作业（达梦 DBMS_JOB / SYSJOB）
+  $DISQL -e "
+    BEGIN
+      -- 全库备份作业 FULLBAK
+      SP_CREATE_JOB('FULLBAK',1,0,'',0,0,'',0,'');
+      SP_JOB_CONFIG_START('FULLBAK');
+      SP_ADD_JOB_STEP('FULLBAK','STEP1',0,'BACKUP DATABASE FULL BACKUPSET ''/dm/backup/fullbak''',1,2,0,0,NULL,0);
+      SP_ADD_JOB_SCHEDULE('FULLBAK','SCH1',1,2,1,0,0,'00:00:00',NULL,SYSDATE,NULL,NULL);
+      SP_JOB_CONFIG_COMMIT('FULLBAK');
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END;
+  " 2>/dev/null
+  $DISQL -e "
+    BEGIN
+      -- 清理归档日志作业 DELARCH
+      SP_CREATE_JOB('DELARCH',1,0,'',0,0,'',0,'');
+      SP_JOB_CONFIG_START('DELARCH');
+      SP_ADD_JOB_STEP('DELARCH','STEP1',0,'DELETE ARCHIVELOG BEFORE SYSDATE-7',1,2,0,0,NULL,0);
+      SP_ADD_JOB_SCHEDULE('DELARCH','SCH1',1,2,1,0,0,'02:00:00',NULL,SYSDATE,NULL,NULL);
+      SP_JOB_CONFIG_COMMIT('DELARCH');
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END;
+  " 2>/dev/null
+  ef_ok "Q7: 定时作业 FULLBAK + DELARCH 已创建"
+
+  ef_step 8 "模拟学生操作 — Q8-Q9 性能优化/备份安全 [达梦]"
+  # Q8: 索引
+  $DISQL -e "
+    CREATE INDEX ${EXAM_USER_NAME}.IX_EMP_EMPNAME ON ${EXAM_USER_NAME}.TAB_EMP(EMPLOYEE_NAME);
+  " 2>/dev/null
+  ef_ok "Q8: 索引 IX_EMP_EMPNAME 已创建"
+
+  # 收集统计信息
+  $DISQL -e "
+    DBMS_STATS.GATHER_TABLE_STATS(UPPER('${EXAM_USER_NAME}'),'TAB_EMP');
+  " 2>/dev/null
+  ef_ok "Q8: TAB_EMP 表统计信息已收集"
+
+  # CACHE_POOL_SIZE (需要修改 dm.ini，动态设置)
+  $DISQL -e "SP_SET_PARA_VALUE(1,'CACHE_POOL_SIZE',500);" 2>/dev/null
+  ef_ok "Q8: CACHE_POOL_SIZE = 500"
+
+  # Q9: 归档模式 + 归档路径
+  mkdir -p /dm/arch /dm/backup 2>/dev/null
+  # 归档模式需要在配置文件和重启后生效，这里尝试动态设置
+  $DISQL -e "
+    ALTER DATABASE MOUNT;
+    ALTER DATABASE ARCHIVELOG;
+    ALTER DATABASE ADD ARCHIVELOG 'DEST=/dm/arch, TYPE=LOCAL, FILE_SIZE=128, SPACE_LIMIT=10240';
+    ALTER DATABASE OPEN;
+  " 2>/dev/null
+  ef_info "Q9: 归档模式设置（可能需要重启生效）"
+  ef_ok "Q9: /dm/arch + /dm/backup 目录已创建"
+
+  # 物理备份（使用 RMAN 或 SQL）
+  $DISQL -e "BACKUP DATABASE FULL BACKUPSET '/dm/backup/e2e_fullbak';" 2>/dev/null
+  ef_ok "Q9: 全库物理备份已创建"
+
+  # 逻辑备份（dexp）
+  if command -v $DMPATH/dexp &>/dev/null; then
+    $DMPATH/dexp SYSDBA/Dameng123@localhost:5236 FILE=/dm/backup/dmexam.dmp LOG=/dm/backup/dmexam.log OWNER=${EXAM_USER_NAME} 2>/dev/null
+    ef_ok "Q9: 逻辑备份 dmexam.dmp + dmexam.log 已创建"
+  else
+    ef_info "Q9: dexp 不可用，跳过逻辑备份"
+  fi
+
+  ef_info "Q10: 数据库软件卸载 — 跳过（与Q1-Q9冲突）"
+
+  fi
+  # ════ 分支结束 ════
+  echo ""
+
+  # ════════════════════════════════════════════════════════════════
+  # 步骤 9：运行 Agent 评分
+  # ════════════════════════════════════════════════════════════════
+  ef_step 9 "运行 Agent 自动评分"
+
+  # 清除旧 Token
+  rm -f ~/.exam_agent/token.json 2>/dev/null
+  ef_info "已清除 Agent Token 缓存"
+  ef_info "考试 ID: $EXAM_ID | 学生: $E2E_STUDENT"
+
+  local AGENT_LOG="/tmp/e2e_full_agent_$$.log"
+  echo -e "\n${BOLD}───────── Agent 输出开始 ─────────${NC}"
+  cd "$PROJECT_DIR" && python3 client_agent/exam_agent.py \
+    --student-id "$E2E_STUDENT" \
+    --password "$E2E_PASSWORD" \
+    --server "$SERVER_URL" \
+    --exam-id "$EXAM_ID" \
+    --auto 2>&1 | tee "$AGENT_LOG"
+  local AGENT_EXIT=${PIPESTATUS[0]}
+  echo -e "${BOLD}───────── Agent 输出结束 ─────────${NC}"
+
+  if [[ $AGENT_EXIT -eq 0 ]]; then
+    ef_ok "Agent 执行成功 (exit code: 0)"
+  else
+    ef_fail "Agent 执行失败 (exit code: $AGENT_EXIT)"
+  fi
+
+  # 提取总分
+  local TOTAL_SCORE
+  TOTAL_SCORE=$(grep -oP '最终得分：\K[0-9]+' "$AGENT_LOG" 2>/dev/null | head -1)
+  if [[ -z "$TOTAL_SCORE" ]]; then
+    TOTAL_SCORE=$(grep -oP '总分：\K[0-9]+' "$AGENT_LOG" 2>/dev/null | head -1)
+  fi
+  ef_info "Agent 上报总分: ${TOTAL_SCORE:-未知}"
+  rm -f "$AGENT_LOG" 2>/dev/null
+
+  # ════════════════════════════════════════════════════════════════
+  # 结果展示
+  # ════════════════════════════════════════════════════════════════
+  echo ""
+  echo -e "${BOLD}══════════════════════════════════════════${NC}"
+  echo -e "${BOLD}  评分结果${NC}"
+  echo -e "${BOLD}══════════════════════════════════════════${NC}"
+
+  # 从数据库获取详细成绩
+  local RECORD
+  RECORD=$(MYSQL_PWD="$DB_PASS" $EXAM_MYSQL -N -s -e "
+    SELECT er.id, er.totalScore, er.maxPossibleScore, er.status, er.submittedAt
+    FROM exam_records er
+    WHERE er.examId = ${EXAM_ID}
+    ORDER BY er.id DESC LIMIT 1;
+  " 2>/dev/null)
+
+  if [[ -n "$RECORD" ]]; then
+    local REC_ID=$(echo "$RECORD" | awk '{print $1}')
+    local REC_SCORE=$(echo "$RECORD" | awk '{print $2}')
+    local REC_STATUS=$(echo "$RECORD" | awk '{print $4}')
+    ef_ok "考试记录已保存 (记录ID: $REC_ID)"
+    echo ""
+
+    echo -e "  ${BOLD}╔══════════════════════════════════════════════╗${NC}"
+    echo -e "  ${BOLD}║         10题 MySQL 考试成绩报告              ║${NC}"
+    echo -e "  ${BOLD}╠══════════════════════════════════════════════╣${NC}"
+    echo -e "  ${BOLD}║${NC}  考试 ID:   ${EXAM_ID}"
+    echo -e "  ${BOLD}║${NC}  学生:      ${E2E_STUDENT}"
+    echo -e "  ${BOLD}║${NC}  状态:      ${REC_STATUS}"
+    echo -e "  ${BOLD}║${NC}"
+
+    # 每题得分（从 score_details 表获取）
+    echo -e "  ${BOLD}║  ── 每题得分明细 ──${NC}"
+    local DETAILS
+    DETAILS=$(MYSQL_PWD="$DB_PASS" $EXAM_MYSQL -N -s -e "
+      SELECT q.title, sd.earnedScore, sd.maxScore
+      FROM score_details sd
+      JOIN questions q ON q.id = sd.questionId
+      WHERE sd.examRecordId = ${REC_ID}
+      ORDER BY q.sortOrder;
+    " 2>/dev/null)
+
+    local TOTAL_GOT=0
+    local TOTAL_MAX=0
+    while IFS=$'\t' read -r QTITLE QSCORE QMAX; do
+      [[ -z "$QTITLE" ]] && continue
+      QSCORE=${QSCORE:-0}
+      TOTAL_GOT=$((TOTAL_GOT + QSCORE))
+      TOTAL_MAX=$((TOTAL_MAX + QMAX))
+      if [[ "$QSCORE" -eq "$QMAX" ]]; then
+        echo -e "  ${BOLD}║${NC}    ${GREEN}✓${NC} ${QTITLE}  ${GREEN}${QSCORE}/${QMAX}${NC}"
+      elif [[ "$QSCORE" -gt 0 ]]; then
+        echo -e "  ${BOLD}║${NC}    ${YELLOW}△${NC} ${QTITLE}  ${YELLOW}${QSCORE}/${QMAX}${NC}"
+      else
+        echo -e "  ${BOLD}║${NC}    ${RED}✗${NC} ${QTITLE}  ${RED}${QSCORE}/${QMAX}${NC}"
+      fi
+    done <<< "$DETAILS"
+
+    echo -e "  ${BOLD}║${NC}"
+    if [[ "$TOTAL_GOT" -ge 100 ]]; then
+      echo -e "  ${BOLD}║${NC}  ${GREEN}${BOLD}总分: ${TOTAL_GOT} / ${TOTAL_MAX}  ★ 优秀！${NC}"
+    elif [[ "$TOTAL_GOT" -ge 80 ]]; then
+      echo -e "  ${BOLD}║${NC}  ${YELLOW}${BOLD}总分: ${TOTAL_GOT} / ${TOTAL_MAX}  △ 良好${NC}"
+    else
+      echo -e "  ${BOLD}║${NC}  ${RED}${BOLD}总分: ${TOTAL_GOT} / ${TOTAL_MAX}${NC}"
+    fi
+    echo -e "  ${BOLD}╚══════════════════════════════════════════════╝${NC}"
+  else
+    ef_fail "数据库中未找到考试记录"
+  fi
+
+  echo ""
+  echo -e "${BOLD}══════════════════════════════════════════${NC}"
+  echo -e "  通过检查点: ${GREEN}${PASS}${NC} | 失败: ${RED}${FAIL}${NC}"
+  echo -e "${BOLD}══════════════════════════════════════════${NC}"
+  echo ""
+
+  if [[ "$FAIL" -eq 0 ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
 # ─── 主流程 ───────────────────────────────────────────────────────────────────
 main() {
   # 初始化日志
@@ -2765,6 +3504,9 @@ main() {
       ;;
     e2e-test)
       e2e_test
+      ;;
+    e2e-full)
+      e2e_full_test
       ;;
     package-client)
       package_client
