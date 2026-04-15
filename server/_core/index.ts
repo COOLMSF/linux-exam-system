@@ -2,6 +2,9 @@ import "dotenv/config";
 import express from "express";
 import { createServer } from "http";
 import net from "net";
+import { execSync } from "child_process";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { registerOAuthRoutes } from "./oauth";
 import { appRouter } from "../routers";
@@ -27,7 +30,28 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
   throw new Error(`No available port found starting from ${startPort}`);
 }
 
+async function runMigrations() {
+  if (!process.env.DATABASE_URL) {
+    console.warn("[migrate] DATABASE_URL not set, skipping auto-migration");
+    return;
+  }
+  try {
+    const __dirname = dirname(fileURLToPath(import.meta.url));
+    const projectRoot = join(__dirname, "../..");
+    const schemaPath = join(projectRoot, "drizzle/schema.ts");
+    console.log("[migrate] Running drizzle-kit push to sync database schema...");
+    execSync(
+      `npx drizzle-kit push --dialect mysql --schema "${schemaPath}" --url "${process.env.DATABASE_URL}" --force`,
+      { cwd: projectRoot, stdio: "pipe", timeout: 30000 }
+    );
+    console.log("[migrate] Database schema synced successfully");
+  } catch (error: any) {
+    console.warn("[migrate] Auto-migration failed (tables may already exist):", error.stderr?.toString().slice(0, 200) || error.message);
+  }
+}
+
 async function startServer() {
+  await runMigrations();
   const app = express();
   const server = createServer(app);
   // Configure body parser with larger size limit for file uploads

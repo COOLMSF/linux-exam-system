@@ -11,7 +11,20 @@ if [ -d "/dm/bin" ] || command -v disql &>/dev/null; then
     DM_CONN="sysdba/Dameng123@localhost:${PORT_EXPECTED:-5236}"
 else
     DB_TYPE="mysql"
-    MYSQL_CMD="mysql -u root -N -s"
+    # 自动探测 MySQL root 连接（支持密码 + TCP）
+    _ROOT_PASS=""
+    for _pf in "$(dirname "$0")/../.mysql_root_pass" "/opt/linux-exam-system/.mysql_root_pass" "/home/ubuntu/linux-exam-system/.mysql_root_pass"; do
+        [ -f "$_pf" ] && _ROOT_PASS=$(cat "$_pf") && break
+    done
+    if [ -n "$_ROOT_PASS" ] && mysql -u root -p"${_ROOT_PASS}" -h 127.0.0.1 -N -s -e "SELECT 1" &>/dev/null; then
+        MYSQL_CMD="mysql -u root -p${_ROOT_PASS} -h 127.0.0.1 -N -s"
+    elif mysql -u root -h 127.0.0.1 -N -s -e "SELECT 1" &>/dev/null; then
+        MYSQL_CMD="mysql -u root -h 127.0.0.1 -N -s"
+    elif mysql -u root -N -s -e "SELECT 1" &>/dev/null; then
+        MYSQL_CMD="mysql -u root -N -s"
+    else
+        MYSQL_CMD="mysql -u root -N -s"
+    fi
 fi
 DB_EXPECTED="${DB_EXPECTED:-examdb_a}"
 PORT_EXPECTED="${PORT_EXPECTED:-3306}"

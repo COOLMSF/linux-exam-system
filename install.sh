@@ -60,6 +60,7 @@ for arg in "$@"; do
     --status)      MODE="status"       ;;
     --demo-exam)   MODE="demo-exam"    ;;
     --reset-db)    MODE="reset-db"     ;;
+    --reset-mysql-pwd) MODE="reset-mysql-pwd" ;;
     --install-mysql)    MODE="install-mysql"    ;;
     --uninstall-mysql)  MODE="uninstall-mysql"  ;;
     --install-dameng)   MODE="install-dameng"   ;;
@@ -108,10 +109,11 @@ for arg in "$@"; do
       echo "  --test-only     仅运行测试验证（不安装）"
       echo ""
       echo "维护模式（需要 root 权限）："
-      echo "  --reset-db      重置管理员密码（保留所有数据）"
+      echo "  --reset-db          重置管理员密码（保留所有数据）"
+      echo "  --reset-mysql-pwd   一键重置 MySQL root 和 exam_user 密码"
       echo ""
-      echo "环境变量："
-      echo "  MYSQL_ROOT_PASSWORD   MySQL root 密码（数据库初始化时需要）"
+      echo "配置文件："
+      echo "  .mysql_root_pass    MySQL root 密码（数据库初始化时需要，放在项目根目录）"
       echo ""
       echo "  --help          显示此帮助"
       echo ""
@@ -133,7 +135,7 @@ for arg in "$@"; do
       echo "  sudo bash install.sh --install-dameng   # 一键安装达梦 DM8"
       echo "  sudo bash install.sh --uninstall-dameng # 一键卸载达梦 DM8"
       echo "  sudo bash install.sh --reset-db         # 重置管理员密码（保留所有数据）"
-      echo "  export MYSQL_ROOT_PASSWORD='your_pass' && bash install.sh  # 指定 MySQL 密码"
+      echo "  echo 'your_pass' > .mysql_root_pass && sudo bash install.sh  # 指定 MySQL 密码"
       exit 0
       ;;
   esac
@@ -1451,34 +1453,37 @@ init_database() {
   # 检查 MySQL root 密码
   local root_password=""
   
-  # 1. 尝试从环境变量读取
-  if [[ -n "${MYSQL_ROOT_PASSWORD:-}" ]]; then
-    root_password="$MYSQL_ROOT_PASSWORD"
-    log_info "使用环境变量 MYSQL_ROOT_PASSWORD"
-  # 2. 尝试从配置文件读取
-  elif [[ -f "$SCRIPT_DIR/.mysql_root_pass" ]]; then
+  # 从配置文件读取
+  if [[ -f "$SCRIPT_DIR/.mysql_root_pass" ]]; then
     root_password=$(cat "$SCRIPT_DIR/.mysql_root_pass")
     log_info "使用配置文件中的 MySQL root 密码"
   fi
 
-  # 如果没有 root 密码，尝试使用空密码连接测试
+  # 确定 MySQL root 连接方式
+  local MYSQL_ROOT_CMD=""
+
   if [[ -z "$root_password" ]]; then
-    log_warn "未配置 MySQL root 密码，尝试使用空密码..."
+    log_warn "未配置 MySQL root 密码，自动探测连接方式..."
     if mysql -h localhost -u root -e "SELECT 1" &>/dev/null; then
-      root_password=""
+      MYSQL_ROOT_CMD="mysql -h localhost -u root"
       log_ok "MySQL root 无需密码"
+    elif sudo mysql -u root -e "SELECT 1" &>/dev/null; then
+      MYSQL_ROOT_CMD="sudo mysql -u root"
+      log_ok "MySQL root 使用 sudo (auth_socket) 连接"
     else
-      log_error "MySQL root 需要密码，请设置环境变量 MYSQL_ROOT_PASSWORD"
-      log_info "用法：export MYSQL_ROOT_PASSWORD='your_root_password'"
+      log_error "MySQL root 连接失败，请使用以下任一方式："
+      log_info "  方式1：echo '你的root密码' > $SCRIPT_DIR/.mysql_root_pass"
+      log_info "  方式2：确保当前用户有 sudo 权限（auth_socket 方式）"
       exit 1
     fi
+  else
+    MYSQL_ROOT_CMD="mysql -h localhost -u root -p${root_password}"
   fi
 
   log_info "创建数据库和用户..."
 
-  # MySQL 初始化脚本（支持密码）
-  if [[ -n "$root_password" ]]; then
-    mysql -h localhost -u root -p"${root_password}" <<MYSQL_SCRIPT
+  # 执行初始化 SQL
+  $MYSQL_ROOT_CMD <<MYSQL_SCRIPT
 -- 创建数据库
 CREATE DATABASE IF NOT EXISTS linux_exam CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
@@ -1490,24 +1495,10 @@ FLUSH PRIVILEGES;
 -- 验证
 SELECT 'Database created successfully' AS status;
 MYSQL_SCRIPT
-  else
-    mysql -h localhost -u root <<MYSQL_SCRIPT
--- 创建数据库
-CREATE DATABASE IF NOT EXISTS linux_exam CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-
--- 创建用户并授权
-CREATE USER IF NOT EXISTS 'exam_user'@'localhost' IDENTIFIED BY '${db_password}';
-GRANT ALL PRIVILEGES ON linux_exam.* TO 'exam_user'@'localhost';
-FLUSH PRIVILEGES;
-
--- 验证
-SELECT 'Database created successfully' AS status;
-MYSQL_SCRIPT
-  fi
 
   if [[ $? -ne 0 ]]; then
     log_error "数据库初始化失败"
-    log_info "提示：请确认 MySQL root 密码正确 (export MYSQL_ROOT_PASSWORD='your_password')"
+    log_info "提示：请确认 MySQL root 密码正确 (echo 'your_password' > $SCRIPT_DIR/.mysql_root_pass)"
     exit 1
   fi
 
@@ -1595,14 +1586,6 @@ if (!dbUrl) {
   process.exit(1);
 }
 
-// 解析数据库连接
-const match = dbUrl.match(/mysql:\/\/([^:]+):([^@]+)@([^:]+):(\d+)\/(.+)/);
-if (!match) {
-  console.error('无法解析 DATABASE_URL');
-  process.exit(1);
-}
-
-const [, user, password, host, port, database] = match;
 const mysql = require('mysql2/promise');
 
 // 密码哈希函数
@@ -1616,15 +1599,46 @@ function makePasswordHash(password) {
 async function resetAdminPasswords() {
   let connection;
   try {
-    // URL decode password for mysql connection
-    const decodedPassword = decodeURIComponent(password);
-    connection = await mysql.createConnection({
-      host,
-      port: parseInt(port),
-      user,
-      password: decodedPassword,
-      database
-    });
+    // 尝试连接数据库：exam_user -> root(配置文件) -> root(无密码)
+    const match = dbUrl.match(/mysql:\/\/([^:]+):([^@]+)@([^:]+):(\d+)\/(.+)/);
+    const dbName = match ? match[5] : 'linux_exam';
+    const dbHost = match ? match[3] : 'localhost';
+    const dbPort = match ? parseInt(match[4]) : 3306;
+
+    // 读取 root 密码（从配置文件）
+    const fs2 = require('fs');
+    let rootPass = '';
+    for (const pf of [
+      require('path').join(process.cwd(), '.mysql_root_pass'),
+      '/opt/linux-exam-system/.mysql_root_pass',
+      require('path').join(process.env.HOME || '/root', '.mysql_root_pass')
+    ]) {
+      try { rootPass = fs2.readFileSync(pf, 'utf-8').trim(); break; } catch(_) {}
+    }
+
+    const tryConnect = async (opts) => mysql.createConnection(opts);
+    const connAttempts = [
+      { label: 'exam_user (DATABASE_URL)', fn: () => tryConnect(dbUrl) },
+      { label: 'exam_user (TCP 127.0.0.1)', fn: () => tryConnect({ host: '127.0.0.1', port: dbPort, user: match?.[1], password: match ? decodeURIComponent(match[2]) : '', database: dbName }) },
+    ];
+    if (rootPass) {
+      connAttempts.push({ label: 'root (配置文件密码+TCP)', fn: () => tryConnect({ host: '127.0.0.1', port: dbPort, user: 'root', password: rootPass, database: dbName }) });
+      connAttempts.push({ label: 'root (配置文件密码)', fn: () => tryConnect({ host: dbHost, port: dbPort, user: 'root', password: rootPass, database: dbName }) });
+    }
+    connAttempts.push({ label: 'root (无密码)', fn: () => tryConnect({ host: '127.0.0.1', port: dbPort, user: 'root', password: '', database: dbName }) });
+
+    for (const attempt of connAttempts) {
+      try {
+        connection = await attempt.fn();
+        console.log('连接成功：' + attempt.label);
+        break;
+      } catch (e) {
+        // 继续尝试下一种方式
+      }
+    }
+    if (!connection) {
+      throw new Error('所有连接方式均失败，请检查 .env 中 DATABASE_URL 或 .mysql_root_pass 配置');
+    }
     
     console.log('数据库连接成功');
     
@@ -1681,6 +1695,227 @@ NODESCRIPT
   fi
 }
 
+# ─── 一键重置 MySQL 密码 ──────────────────────────────────────────────────────
+reset_mysql_passwords() {
+  log_section "一键重置 MySQL root 和 exam_user 密码"
+
+  echo -e "${CYAN}${BOLD}🔑 MySQL 密码重置工具${NC}"
+  echo ""
+  echo "  此操作将："
+  echo "    1. 重置 MySQL root 密码"
+  echo "    2. 重置 exam_user 密码"
+  echo "    3. 自动更新 .env 中的 DATABASE_URL"
+  echo "    4. 保留所有数据库数据"
+  echo ""
+
+  # ── 确定新密码 ──
+  local new_root_pass new_exam_pass
+  read -r -p "  请输入新的 MySQL root 密码（直接回车自动生成）: " new_root_pass
+  if [[ -z "$new_root_pass" ]]; then
+    new_root_pass=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 16 || echo "Root$(date +%s)")
+    log_info "自动生成 root 密码: $new_root_pass"
+  fi
+
+  read -r -p "  请输入新的 exam_user 密码（直接回车自动生成）: " new_exam_pass
+  if [[ -z "$new_exam_pass" ]]; then
+    new_exam_pass=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 16 || echo "Exam$(date +%s)")
+    log_info "自动生成 exam_user 密码: $new_exam_pass"
+  fi
+
+  echo ""
+  read -r -p "  确定要重置密码吗？(输入 yes 确认): " confirm
+  if [[ "$confirm" != "yes" ]]; then
+    log_warn "用户取消操作"
+    exit 0
+  fi
+
+  # ── 第一步：获取 MySQL root 连接 ──
+  log_info "尝试连接 MySQL..."
+  local MYSQL_ROOT_CMD=""
+
+  # 尝试 1：配置文件中的旧密码
+  local old_root_pass=""
+  if [[ -f "$SCRIPT_DIR/.mysql_root_pass" ]]; then
+    old_root_pass=$(cat "$SCRIPT_DIR/.mysql_root_pass")
+  fi
+
+  if [[ -n "$old_root_pass" ]]; then
+    if mysql -h localhost -u root -p"${old_root_pass}" -e "SELECT 1" &>/dev/null; then
+      MYSQL_ROOT_CMD="mysql -h localhost -u root -p${old_root_pass}"
+      log_ok "使用已知 root 密码连接成功"
+    fi
+  fi
+
+  # 尝试 2：空密码
+  if [[ -z "$MYSQL_ROOT_CMD" ]]; then
+    if mysql -h localhost -u root -e "SELECT 1" &>/dev/null; then
+      MYSQL_ROOT_CMD="mysql -h localhost -u root"
+      log_ok "MySQL root 无需密码"
+    fi
+  fi
+
+  # 尝试 3：sudo mysql (auth_socket)
+  if [[ -z "$MYSQL_ROOT_CMD" ]]; then
+    if sudo mysql -u root -e "SELECT 1" &>/dev/null; then
+      MYSQL_ROOT_CMD="sudo mysql -u root"
+      log_ok "MySQL root 使用 sudo (auth_socket) 连接"
+    fi
+  fi
+
+  # 尝试 4：安全模式重置（最后手段）
+  if [[ -z "$MYSQL_ROOT_CMD" ]]; then
+    log_warn "所有常规方式均无法连接，尝试安全模式重置..."
+
+    # 停止 MySQL
+    log_info "停止 MySQL 服务..."
+    systemctl stop mysql 2>/dev/null || systemctl stop mysqld 2>/dev/null || service mysql stop 2>/dev/null
+    sleep 2
+
+    # 以 skip-grant-tables 启动
+    log_info "以安全模式启动 MySQL..."
+    mysqld_safe --skip-grant-tables --skip-networking &
+    local SAFE_PID=$!
+    sleep 3
+
+    # 在安全模式下重置 root 密码
+    if mysql -u root -e "SELECT 1" &>/dev/null; then
+      mysql -u root <<SAFE_SQL
+FLUSH PRIVILEGES;
+ALTER USER 'root'@'localhost' IDENTIFIED BY '${new_root_pass}';
+FLUSH PRIVILEGES;
+SAFE_SQL
+      log_ok "安全模式下 root 密码已重置"
+
+      # 停止安全模式 MySQL，正常重启
+      kill "$SAFE_PID" 2>/dev/null
+      sleep 2
+      systemctl start mysql 2>/dev/null || systemctl start mysqld 2>/dev/null || service mysql start 2>/dev/null
+      sleep 2
+
+      MYSQL_ROOT_CMD="mysql -h localhost -u root -p${new_root_pass}"
+
+      # root 已经改好了，只需要改 exam_user
+      $MYSQL_ROOT_CMD <<EXAM_SQL
+ALTER USER 'exam_user'@'localhost' IDENTIFIED BY '${new_exam_pass}';
+FLUSH PRIVILEGES;
+EXAM_SQL
+
+      if [[ $? -eq 0 ]]; then
+        log_ok "exam_user 密码重置成功"
+      else
+        log_warn "exam_user 可能不存在，稍后创建"
+        $MYSQL_ROOT_CMD <<CREATE_SQL
+CREATE USER IF NOT EXISTS 'exam_user'@'localhost' IDENTIFIED BY '${new_exam_pass}';
+GRANT ALL PRIVILEGES ON linux_exam.* TO 'exam_user'@'localhost';
+FLUSH PRIVILEGES;
+CREATE_SQL
+      fi
+
+      # 跳转到更新配置
+      _reset_mysql_update_config "$new_root_pass" "$new_exam_pass"
+      return 0
+    else
+      kill "$SAFE_PID" 2>/dev/null
+      systemctl start mysql 2>/dev/null || systemctl start mysqld 2>/dev/null
+      log_error "安全模式重置也失败了，请手动检查 MySQL 状态"
+      exit 1
+    fi
+  fi
+
+  # ── 第二步：使用 root 连接重置两个密码 ──
+  log_info "重置 MySQL root 密码..."
+  $MYSQL_ROOT_CMD <<ROOT_SQL
+ALTER USER 'root'@'localhost' IDENTIFIED BY '${new_root_pass}';
+FLUSH PRIVILEGES;
+ROOT_SQL
+
+  if [[ $? -eq 0 ]]; then
+    log_ok "root 密码重置成功"
+  else
+    log_error "root 密码重置失败"
+    exit 1
+  fi
+
+  # 用新 root 密码连接
+  log_info "重置 exam_user 密码..."
+  mysql -h localhost -u root -p"${new_root_pass}" <<EXAM_SQL
+ALTER USER IF EXISTS 'exam_user'@'localhost' IDENTIFIED BY '${new_exam_pass}';
+CREATE USER IF NOT EXISTS 'exam_user'@'localhost' IDENTIFIED BY '${new_exam_pass}';
+GRANT ALL PRIVILEGES ON linux_exam.* TO 'exam_user'@'localhost';
+FLUSH PRIVILEGES;
+EXAM_SQL
+
+  if [[ $? -eq 0 ]]; then
+    log_ok "exam_user 密码重置成功"
+  else
+    log_error "exam_user 密码重置失败"
+    exit 1
+  fi
+
+  _reset_mysql_update_config "$new_root_pass" "$new_exam_pass"
+}
+
+# 内部函数：更新配置文件
+_reset_mysql_update_config() {
+  local new_root_pass="$1"
+  local new_exam_pass="$2"
+
+  # URL 编码密码中的特殊字符
+  local encoded_exam_pass
+  encoded_exam_pass=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${new_exam_pass}', safe=''))" 2>/dev/null || echo "$new_exam_pass")
+
+  local new_db_url="mysql://exam_user:${encoded_exam_pass}@localhost:3306/linux_exam"
+
+  # 更新 .env 文件
+  for env_file in "$SCRIPT_DIR/.env" "$INSTALL_DIR/.env"; do
+    if [[ -f "$env_file" ]]; then
+      if grep -q "^DATABASE_URL=" "$env_file"; then
+        sed -i "s|^DATABASE_URL=.*|DATABASE_URL=${new_db_url}|" "$env_file"
+        log_ok "已更新 $env_file"
+      else
+        echo "DATABASE_URL=${new_db_url}" >> "$env_file"
+        log_ok "已写入 $env_file"
+      fi
+    fi
+  done
+
+  # 保存密码到文件
+  echo "$new_root_pass" > "$SCRIPT_DIR/.mysql_root_pass"
+  chmod 600 "$SCRIPT_DIR/.mysql_root_pass"
+  echo "$new_exam_pass" > /tmp/linux_exam_db_pass.tmp
+  chmod 600 /tmp/linux_exam_db_pass.tmp
+
+  # 验证连接
+  log_info "验证新密码连接..."
+  if mysql -h localhost -u root -p"${new_root_pass}" -e "SELECT 'root OK'" &>/dev/null; then
+    log_ok "root 连接验证通过"
+  else
+    log_warn "root TCP 连接失败（可能仅支持 socket 连接）"
+  fi
+
+  if mysql -h localhost -u exam_user -p"${new_exam_pass}" linux_exam -e "SELECT 'exam_user OK'" &>/dev/null; then
+    log_ok "exam_user 连接验证通过"
+  else
+    log_warn "exam_user 连接验证失败，请检查"
+  fi
+
+  echo ""
+  echo -e "${GREEN}${BOLD}════════════════════════════════════════${NC}"
+  echo -e "${GREEN}${BOLD}  MySQL 密码重置完成！${NC}"
+  echo -e "${GREEN}${BOLD}════════════════════════════════════════${NC}"
+  echo ""
+  echo -e "  ${BOLD}root 密码:${NC}       $new_root_pass"
+  echo -e "  ${BOLD}exam_user 密码:${NC}  $new_exam_pass"
+  echo -e "  ${BOLD}DATABASE_URL:${NC}    $new_db_url"
+  echo ""
+  echo -e "  密码已保存到："
+  echo -e "    root:       $SCRIPT_DIR/.mysql_root_pass"
+  echo -e "    exam_user:  /tmp/linux_exam_db_pass.tmp"
+  echo ""
+  echo -e "  ${YELLOW}请妥善保管以上密码！${NC}"
+  echo ""
+}
+
 # ─── 数据库迁移 ───────────────────────────────────────────────────────────────
 run_database_migration() {
   log_section "执行数据库迁移"
@@ -1693,8 +1928,8 @@ run_database_migration() {
     pnpm install --frozen-lockfile 2>>"$LOG_FILE" || pnpm install 2>>"$LOG_FILE"
   fi
 
-  # 获取数据库密码
-  local db_pass
+  # 获取数据库连接信息
+  local db_pass db_user="exam_user" db_name="linux_exam"
   if [[ -f /tmp/linux_exam_db_pass.tmp ]]; then
     db_pass=$(cat /tmp/linux_exam_db_pass.tmp)
   else
@@ -1702,246 +1937,231 @@ run_database_migration() {
     db_pass=$(printf '%b' "${db_pass//%/\\x}")
   fi
 
-  # 获取数据库连接信息
-  local db_user="exam_user"
-  local db_name="linux_exam"
+  # 从 .env 读取完整 DATABASE_URL（已正确 URL 编码）
+  local db_url
+  db_url=$(grep "^DATABASE_URL=" "$SCRIPT_DIR/.env" 2>/dev/null | cut -d= -f2-)
 
-  # 方法1：使用 Drizzle ORM 直接迁移（推荐）
-  log_info "使用 Drizzle ORM 直接迁移..."
-  
-  # 创建一个简单的 Node.js 脚本来执行迁移
-  cat > "$SCRIPT_DIR/temp_migrate.js" << 'MIGRATEJS'
-const { drizzle } = require('drizzle-orm/mysql2');
-const mysql = require('mysql2/promise');
-const fs = require('fs');
-const path = require('path');
-
-// 读取 .env 文件
-const envPath = path.join(__dirname, '.env');
-const envContent = fs.readFileSync(envPath, 'utf-8');
-const dbUrl = envContent.match(/^DATABASE_URL=(.+)$/m)?.[1];
-
-if (!dbUrl) {
-  console.error('未找到 DATABASE_URL 配置');
-  process.exit(1);
-}
-
-async function migrate() {
-  try {
-    // 导入 schema
-    const { schema } = await import('./drizzle/schema.ts');
-    
-    // 创建数据库连接
-    const connection = await mysql.createConnection(dbUrl);
-    const db = drizzle(connection, { schema });
-    
-    console.log('数据库连接成功，开始迁移...');
-    
-    // 使用 Drizzle 的 migrate 功能（如果可用）
-    // 注意：这里使用简单的方法，直接创建表结构
-    
-    console.log('迁移完成');
-    await connection.end();
-    process.exit(0);
-  } catch (error) {
-    console.error('迁移失败:', error.message);
-    process.exit(1);
-  }
-}
-
-migrate();
-MIGRATEJS
-  
-  # 执行迁移脚本
-  if node "$SCRIPT_DIR/temp_migrate.js" 2>>"$LOG_FILE"; then
-    log_ok "Drizzle ORM 迁移成功"
+  # 方法1：使用 drizzle-kit push 直接同步 schema（推荐，与 drizzle/schema.ts 保持一致）
+  log_info "尝试使用 drizzle-kit push 同步表结构..."
+  local drizzle_ok=false
+  if command -v npx &>/dev/null && [[ -f "$SCRIPT_DIR/drizzle/schema.ts" ]] && [[ -n "$db_url" ]]; then
+    if npx drizzle-kit push --dialect mysql --schema "$SCRIPT_DIR/drizzle/schema.ts" \
+       --url "$db_url" --force 2>>"$LOG_FILE"; then
+      log_ok "drizzle-kit push 同步成功（表结构与 drizzle/schema.ts 一致）"
+      drizzle_ok=true
+    else
+      log_warn "drizzle-kit push 失败，回退到直接 SQL 建表..."
+    fi
   else
-    log_warn "Drizzle ORM 迁移失败，尝试直接创建表结构..."
-    
-    # 方法2：直接使用 SQL 创建表结构（作为回退）
+    log_warn "npx 或 drizzle/schema.ts 或 DATABASE_URL 不可用，回退到直接 SQL 建表..."
+  fi
+
+  # 方法2：直接使用 SQL 创建表结构（回退方案，与 drizzle/schema.ts 完全对齐）
+  if [[ "$drizzle_ok" != "true" ]]; then
     cat > "$SCRIPT_DIR/temp_schema.sql" << 'SQLSCHEMA'
--- 创建用户表
+-- 创建用户表 (对齐 drizzle/schema.ts → users)
 CREATE TABLE IF NOT EXISTS users (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  openId VARCHAR(255) NOT NULL UNIQUE,
-  name VARCHAR(100) DEFAULT NULL,
-  email VARCHAR(100) DEFAULT NULL,
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  openId VARCHAR(191) NOT NULL UNIQUE,
+  name VARCHAR(120) DEFAULT NULL,
+  email VARCHAR(191) DEFAULT NULL,
+  loginMethod VARCHAR(50) DEFAULT NULL,
+  role VARCHAR(20) NOT NULL DEFAULT 'teacher',
   passwordHash VARCHAR(255) DEFAULT NULL,
-  loginMethod VARCHAR(50) NOT NULL DEFAULT 'local',
-  role ENUM('admin', 'student') NOT NULL DEFAULT 'student',
-  createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  lastSignedIn DATETIME DEFAULT NULL
+  createdAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  lastSignedIn TIMESTAMP NULL DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 创建学生表
+-- 创建学生表 (对齐 drizzle/schema.ts → students)
 CREATE TABLE IF NOT EXISTS students (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  studentId VARCHAR(50) NOT NULL UNIQUE,
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  studentId VARCHAR(64) NOT NULL UNIQUE,
   name VARCHAR(100) NOT NULL,
-  className VARCHAR(50) DEFAULT NULL,
+  className VARCHAR(100) DEFAULT NULL,
   department VARCHAR(100) DEFAULT NULL,
   clientUsername VARCHAR(100) DEFAULT NULL,
-  apiToken VARCHAR(255) DEFAULT NULL,
-  tokenExpiresAt DATETIME DEFAULT NULL,
-  deviceId VARCHAR(255) DEFAULT NULL,
   isActive BOOLEAN NOT NULL DEFAULT 1,
-  createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  apiToken VARCHAR(191) DEFAULT NULL,
+  tokenExpiresAt TIMESTAMP NULL DEFAULT NULL,
+  deviceId VARCHAR(100) DEFAULT NULL,
+  passwordHash VARCHAR(255) DEFAULT NULL,
+  createdAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updatedAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 创建题目分类表
+-- 创建题目分类表 (对齐 drizzle/schema.ts → questionCategories)
 CREATE TABLE IF NOT EXISTS question_categories (
-  id INT AUTO_INCREMENT PRIMARY KEY,
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(100) NOT NULL UNIQUE,
-  description TEXT DEFAULT NULL,
-  createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  description TEXT DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 创建题目表
+-- 创建题目表 (对齐 drizzle/schema.ts → questions)
 CREATE TABLE IF NOT EXISTS questions (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  title VARCHAR(255) NOT NULL,
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  title VARCHAR(200) NOT NULL,
   content TEXT NOT NULL,
-  categoryId INT DEFAULT NULL,
-  difficulty TINYINT NOT NULL DEFAULT 2,
+  categoryId BIGINT UNSIGNED DEFAULT NULL,
+  difficulty INT NOT NULL DEFAULT 2,
   maxScore INT NOT NULL DEFAULT 10,
-  isActive BOOLEAN NOT NULL DEFAULT 1,
+  scoringScript TEXT DEFAULT NULL,
   sortOrder INT NOT NULL DEFAULT 0,
-  createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  FOREIGN KEY (categoryId) REFERENCES question_categories(id) ON DELETE SET NULL
+  isActive BOOLEAN NOT NULL DEFAULT 1,
+  createdAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updatedAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 创建评分规则表
+-- 创建评分规则表 (对齐 drizzle/schema.ts → scoringRules)
 CREATE TABLE IF NOT EXISTS scoring_rules (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  questionId INT NOT NULL,
-  name VARCHAR(100) NOT NULL,
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  questionId BIGINT UNSIGNED NOT NULL,
+  name VARCHAR(200) NOT NULL,
   description TEXT DEFAULT NULL,
-  initialScore INT NOT NULL DEFAULT 10,
-  createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  FOREIGN KEY (questionId) REFERENCES questions(id) ON DELETE CASCADE
+  initialScore INT NOT NULL DEFAULT 10
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 创建评分检查项表
+-- 创建评分检查项表 (对齐 drizzle/schema.ts → scoringCheckItems)
 CREATE TABLE IF NOT EXISTS scoring_check_items (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  ruleId INT NOT NULL,
-  description VARCHAR(255) NOT NULL,
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  ruleId BIGINT UNSIGNED NOT NULL,
+  description VARCHAR(300) NOT NULL,
   checkType VARCHAR(50) NOT NULL,
-  checkTarget VARCHAR(255) NOT NULL,
-  expectedValue VARCHAR(255) DEFAULT NULL,
-  compareOperator VARCHAR(10) DEFAULT 'eq',
+  checkTarget TEXT NOT NULL,
+  expectedValue TEXT DEFAULT NULL,
+  compareOperator VARCHAR(20) DEFAULT 'eq',
   deductionPoints INT NOT NULL DEFAULT 0,
-  failMessage VARCHAR(255) DEFAULT NULL,
+  failMessage TEXT DEFAULT NULL,
   sortOrder INT NOT NULL DEFAULT 0,
-  isActive BOOLEAN NOT NULL DEFAULT 1,
-  createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  FOREIGN KEY (ruleId) REFERENCES scoring_rules(id) ON DELETE CASCADE
+  isActive BOOLEAN NOT NULL DEFAULT 1
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 创建考试场次表
+-- 创建考试场次表 (对齐 drizzle/schema.ts → examSessions)
 CREATE TABLE IF NOT EXISTS exam_sessions (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  name VARCHAR(255) NOT NULL,
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(200) NOT NULL,
   description TEXT DEFAULT NULL,
   durationMinutes INT NOT NULL DEFAULT 120,
   questionCount INT NOT NULL DEFAULT 9,
+  status VARCHAR(20) NOT NULL DEFAULT 'draft',
   categoryFilter JSON DEFAULT NULL,
-  status ENUM('draft', 'active', 'paused', 'ended') NOT NULL DEFAULT 'draft',
-  createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  startedAt DATETIME DEFAULT NULL,
-  endedAt DATETIME DEFAULT NULL
+  startedAt TIMESTAMP NULL DEFAULT NULL,
+  endedAt TIMESTAMP NULL DEFAULT NULL,
+  createdAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 创建考试题目分配表
+-- 创建考试题目分配表 (对齐 drizzle/schema.ts → examQuestionAssignments)
 CREATE TABLE IF NOT EXISTS exam_question_assignments (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  examId INT NOT NULL,
-  studentId INT NOT NULL,
-  questionId INT NOT NULL,
-  personalizedContent TEXT DEFAULT NULL,
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  examId BIGINT UNSIGNED NOT NULL,
+  studentId BIGINT UNSIGNED NOT NULL,
+  questionId BIGINT UNSIGNED NOT NULL,
+  personalizedContent TEXT NOT NULL,
   sortOrder INT NOT NULL DEFAULT 0,
-  questionSet VARCHAR(10) DEFAULT NULL,
-  createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  FOREIGN KEY (examId) REFERENCES exam_sessions(id) ON DELETE CASCADE,
-  FOREIGN KEY (studentId) REFERENCES students(id) ON DELETE CASCADE,
-  FOREIGN KEY (questionId) REFERENCES questions(id) ON DELETE CASCADE
+  questionSet VARCHAR(10) DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 创建考试记录表
+-- 创建考试记录表 (对齐 drizzle/schema.ts → examRecords)
 CREATE TABLE IF NOT EXISTS exam_records (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  examId INT NOT NULL,
-  studentId INT NOT NULL,
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  examId BIGINT UNSIGNED NOT NULL,
+  studentId BIGINT UNSIGNED NOT NULL,
   clientUsername VARCHAR(100) DEFAULT NULL,
   questionSet VARCHAR(10) DEFAULT NULL,
-  status ENUM('in_progress', 'submitted', 'graded', 'completed') NOT NULL DEFAULT 'in_progress',
+  status VARCHAR(20) NOT NULL DEFAULT 'in_progress',
   totalScore INT DEFAULT NULL,
-  maxPossibleScore INT NOT NULL DEFAULT 100,
+  maxPossibleScore INT DEFAULT NULL,
   durationSeconds INT DEFAULT NULL,
   scriptOutput TEXT DEFAULT NULL,
-  startedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  submittedAt DATETIME DEFAULT NULL,
-  gradedAt DATETIME DEFAULT NULL,
-  completedAt DATETIME DEFAULT NULL,
-  FOREIGN KEY (examId) REFERENCES exam_sessions(id) ON DELETE CASCADE,
-  FOREIGN KEY (studentId) REFERENCES students(id) ON DELETE CASCADE
+  startedAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  submittedAt TIMESTAMP NULL DEFAULT NULL,
+  gradedAt TIMESTAMP NULL DEFAULT NULL,
+  completedAt TIMESTAMP NULL DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 创建成绩详情表
+-- 创建成绩详情表 (对齐 drizzle/schema.ts → scoreDetails)
 CREATE TABLE IF NOT EXISTS score_details (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  examRecordId INT NOT NULL,
-  questionId INT NOT NULL,
-  earnedScore INT NOT NULL DEFAULT 0,
-  maxScore INT NOT NULL DEFAULT 10,
-  failedChecks JSON DEFAULT NULL,
-  createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (examRecordId) REFERENCES exam_records(id) ON DELETE CASCADE,
-  FOREIGN KEY (questionId) REFERENCES questions(id) ON DELETE CASCADE
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  examRecordId BIGINT UNSIGNED NOT NULL,
+  questionId BIGINT UNSIGNED NOT NULL,
+  earnedScore INT NOT NULL,
+  maxScore INT NOT NULL,
+  failedChecks JSON DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 SQLSCHEMA
   
-  # 执行 SQL 脚本创建表结构
-  log_info "直接执行 SQL 脚本创建表结构..."
-  MYSQL_PWD="$db_pass" mysql -h localhost -u "$db_user" "$db_name" < "$SCRIPT_DIR/temp_schema.sql" 2>>"$LOG_FILE"
-  
-  if [[ $? -eq 0 ]]; then
-    log_ok "直接 SQL 迁移成功"
+    # 执行 SQL 脚本创建表结构（使用 node + DATABASE_URL，避免密码特殊字符问题）
+    log_info "直接执行 SQL 脚本创建表结构..."
+    if [[ -n "$db_url" ]]; then
+      node -e "
+        const mysql = require('mysql2/promise');
+        const fs = require('fs');
+        (async () => {
+          const conn = await mysql.createConnection('$db_url' + '?multipleStatements=true');
+          const sql = fs.readFileSync('$SCRIPT_DIR/temp_schema.sql', 'utf-8');
+          await conn.query(sql);
+          await conn.end();
+          console.log('OK');
+        })().catch(e => { console.error(e.message); process.exit(1); });
+      " 2>>"$LOG_FILE"
+    else
+      MYSQL_PWD="$db_pass" mysql -h localhost -u "$db_user" "$db_name" < "$SCRIPT_DIR/temp_schema.sql" 2>>"$LOG_FILE"
+    fi
+    
+    if [[ $? -eq 0 ]]; then
+      log_ok "直接 SQL 建表成功"
+    else
+      log_error "SQL 建表失败，请检查日志：$LOG_FILE"
+      exit 1
+    fi
+    
+    # 清理临时文件
+    rm -f "$SCRIPT_DIR/temp_schema.sql"
+  fi
+
+  log_ok "数据库迁移完成"
+
+  # 验证表结构（使用 node + DATABASE_URL，避免密码特殊字符问题）
+  log_info "验证数据库表结构..."
+  local table_count
+  if [[ -n "$db_url" ]]; then
+    table_count=$(node -e "
+      const mysql = require('mysql2/promise');
+      (async () => {
+        const conn = await mysql.createConnection('$db_url');
+        const [rows] = await conn.execute(
+          \"SELECT COUNT(*) AS c FROM information_schema.tables WHERE table_schema='$db_name'\"
+        );
+        console.log(rows[0].c);
+        const [tables] = await conn.execute(
+          \"SELECT table_name FROM information_schema.tables WHERE table_schema='$db_name' ORDER BY table_name\"
+        );
+        tables.forEach(r => console.log('TABLE:' + (r.table_name || r.TABLE_NAME)));
+        await conn.end();
+      })().catch(e => { console.log('0'); process.exit(0); });
+    " 2>/dev/null)
   else
-    log_error "直接 SQL 迁移也失败了"
+    table_count="0"
+  fi
+
+  # 提取表数量（第一行）和表名列表
+  local count_line tables_output
+  count_line=$(echo "$table_count" | head -1)
+  tables_output=$(echo "$table_count" | grep "^TABLE:" | sed 's/^TABLE://')
+
+  if [[ "$count_line" -ge 10 ]] 2>/dev/null; then
+    log_ok "数据库表创建成功 ($count_line 个表)"
+    echo "$tables_output" | while read -r table; do
+      [[ -n "$table" ]] && echo "    - $table"
+    done
+  elif [[ "$count_line" -gt 0 ]] 2>/dev/null; then
+    log_warn "数据库表不完整 ($count_line 个表，期望 10 个)，请检查"
+    echo "$tables_output" | while read -r table; do
+      [[ -n "$table" ]] && echo "    - $table"
+    done
+  else
+    log_error "数据库表创建失败"
     exit 1
   fi
-  
-  # 清理临时文件
-  rm -f "$SCRIPT_DIR/temp_schema.sql"
-fi
-
-# 清理临时迁移脚本
-rm -f "$SCRIPT_DIR/temp_migrate.js"
-
-log_ok "数据库迁移完成"
-
-# 验证表结构
-log_info "验证数据库表结构..."
-local table_count
-table_count=$(MYSQL_PWD="$db_pass" mysql -h localhost -u "$db_user" "$db_name" -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$db_name'" 2>/dev/null || echo "0")
-
-if [[ "$table_count" -gt 0 ]]; then
-  log_ok "数据库表创建成功 ($table_count 个表)"
-  MYSQL_PWD="$db_pass" mysql -h localhost -u "$db_user" "$db_name" -e "SHOW TABLES;" 2>/dev/null | tail -n +2 | while read -r table; do
-    echo "    - $table"
-  done
-else
-  log_error "数据库表创建失败"
-  exit 1
-fi
 }
 
 # ─── 卸载 MySQL ──────────────────────────────────────────────────────────────
@@ -2726,14 +2946,25 @@ e2e_full_test() {
   fi
   ef_info "学生操作数据库类型: ${STUDENT_DB_TYPE}"
 
-  local MYSQL_ROOT="mysql -u root -N -s"
+  local MYSQL_ROOT=""
   if [[ "$STUDENT_DB_TYPE" == "mysql" ]]; then
     if ! command -v mysql &>/dev/null; then
       ef_fail "MySQL 客户端未安装"
       return 1
     fi
-    if ! $MYSQL_ROOT -e "SELECT 1" &>/dev/null; then
-      ef_fail "无法以 root 连接 MySQL（请确保以 root/sudo 运行）"
+    # 自动探测 MySQL root 连接方式（优先 TCP 127.0.0.1，避免 socket 找不到）
+    local _root_pass=""
+    [[ -f "$SCRIPT_DIR/.mysql_root_pass" ]] && _root_pass=$(cat "$SCRIPT_DIR/.mysql_root_pass")
+    if [[ -n "$_root_pass" ]] && mysql -u root -p"${_root_pass}" -h 127.0.0.1 -N -s -e "SELECT 1" &>/dev/null; then
+      MYSQL_ROOT="mysql -u root -p${_root_pass} -h 127.0.0.1 -N -s"
+    elif mysql -u root -h 127.0.0.1 -N -s -e "SELECT 1" &>/dev/null; then
+      MYSQL_ROOT="mysql -u root -h 127.0.0.1 -N -s"
+    elif mysql -u root -N -s -e "SELECT 1" &>/dev/null; then
+      MYSQL_ROOT="mysql -u root -N -s"
+    elif sudo mysql -u root -N -s -e "SELECT 1" &>/dev/null; then
+      MYSQL_ROOT="sudo mysql -u root -N -s"
+    else
+      ef_fail "无法以 root 连接 MySQL（请将密码写入 $SCRIPT_DIR/.mysql_root_pass）"
       return 1
     fi
     ef_ok "MySQL root 连接正常"
@@ -2759,7 +2990,7 @@ e2e_full_test() {
   DB_HOST=$(echo "$DB_URL" | sed -E 's|mysql://[^@]+@([^:]+):.*|\1|')
   DB_PORT=$(echo "$DB_URL" | sed -E 's|mysql://[^@]+@[^:]+:([0-9]+)/.*|\1|')
   DB_NAME=$(echo "$DB_URL" | sed -E 's|mysql://[^/]+/(.*)|\1|')
-  local EXAM_MYSQL="mysql -u $DB_USER -h $DB_HOST -P $DB_PORT $DB_NAME"
+  local EXAM_MYSQL="mysql -u $DB_USER -h 127.0.0.1 -P $DB_PORT $DB_NAME"
   ef_info "考试系统DB: ${DB_USER}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
 
   # ════════════════════════════════════════════════════════════════
@@ -2790,8 +3021,8 @@ e2e_full_test() {
   " 2>/dev/null)
   if [[ -z "$CAT_ID" ]]; then
     MYSQL_PWD="$DB_PASS" $EXAM_MYSQL -e "
-      INSERT INTO question_categories (name, description, createdAt, updatedAt)
-      VALUES ('MySQL综合考试', '10道MySQL默认考试题', NOW(), NOW());
+      INSERT INTO question_categories (name, description)
+      VALUES ('MySQL综合考试', '10道MySQL默认考试题');
     " 2>/dev/null
     CAT_ID=$(MYSQL_PWD="$DB_PASS" $EXAM_MYSQL -N -s -e "SELECT LAST_INSERT_ID();" 2>/dev/null)
   fi
@@ -2884,8 +3115,8 @@ e2e_full_test() {
   # 创建考试场次（设置 categoryFilter 让 fetchQuestions 自动从该分类抽题）
   local EXAM_ID
   EXAM_ID=$(MYSQL_PWD="$DB_PASS" $EXAM_MYSQL -N -s -e "
-    INSERT INTO exam_sessions (name, durationMinutes, questionCount, categoryFilter, status, createdAt, updatedAt)
-    VALUES ('E2E-10题MySQL综合考试', 120, 10, '[${CAT_ID}]', 'active', NOW(), NOW());
+    INSERT INTO exam_sessions (name, durationMinutes, questionCount, categoryFilter, status, createdAt)
+    VALUES ('E2E-10题MySQL综合考试', 120, 10, '[${CAT_ID}]', 'active', NOW());
     SELECT LAST_INSERT_ID();
   " 2>/dev/null)
   ef_ok "考试场次创建成功 (ID:$EXAM_ID, 10题, 分类:$CAT_ID)"
@@ -2927,7 +3158,7 @@ e2e_full_test() {
   " 2>/dev/null
   ef_ok "Q2: recovery_test 表已创建，id=107 数据已恢复"
   mkdir -p /var/lib/mysql_backup 2>/dev/null
-  mysqldump -u root ${EXAMDB} > /var/lib/mysql_backup/examdata.sql 2>/dev/null
+  MYSQL_PWD="${_root_pass}" mysqldump -u root -h 127.0.0.1 ${EXAMDB} > /var/lib/mysql_backup/examdata.sql 2>/dev/null
   ef_ok "Q2: /var/lib/mysql_backup/examdata.sql 已导出"
 
   ef_step 5 "模拟学生操作 — Q3 用户与权限管理 [MySQL]"
@@ -3046,8 +3277,8 @@ TRIGSQL
   $MYSQL_ROOT -e "SET GLOBAL binlog_expire_logs_seconds = 604800;" 2>/dev/null
   ef_ok "Q9: binlog_format=ROW, expire=7天"
   mkdir -p /var/lib/mysql_backup 2>/dev/null
-  mysqldump -u root --all-databases > /var/lib/mysql_backup/full_backup.sql 2>/dev/null
-  mysqldump -u root ${EXAMDB} > /var/lib/mysql_backup/${EXAMDB}.sql 2>/dev/null
+  MYSQL_PWD="${_root_pass}" mysqldump -u root -h 127.0.0.1 --all-databases > /var/lib/mysql_backup/full_backup.sql 2>/dev/null
+  MYSQL_PWD="${_root_pass}" mysqldump -u root -h 127.0.0.1 ${EXAMDB} > /var/lib/mysql_backup/${EXAMDB}.sql 2>/dev/null
   ef_ok "Q9: 全库备份 + 单库备份已创建"
   ef_info "Q10: 数据库软件卸载 — 跳过（与Q1-Q9冲突）"
 
@@ -3489,6 +3720,9 @@ main() {
       ;;
     reset-db)
       reset_database
+      ;;
+    reset-mysql-pwd)
+      reset_mysql_passwords
       ;;
     install-mysql)
       install_mysql
